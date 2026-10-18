@@ -1,0 +1,1378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FlashAttention · Explained</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ================= DESIGN TOKENS (do not change per deck) ================= */
+*,*::before,*::after{box-sizing:border-box}
+:root{
+  --purple:#4E0973;--deep:#3E055C;--deeper:#2E0447;--mid:#6B2A9E;--mid2:#7A53A2;
+  --lilac:#C4B0E8;--lilac2:#AD9CD5;--bg1:#F7F4FB;--bg2:#EEE8F6;
+  --ink:#241733;--muted:#5E5670;--muted2:#736B80;--hair:#D6CCE8;--hair2:#E6DDF2;
+  --gold:#8E6420;--goldD:#DCA972;--red:#CC4B4B;--red2:#B23A3A;--mint:#9CE8C0;--ok:#2f8a5c;
+  --ease:cubic-bezier(.2,.8,.2,1);
+  --f-head:'Archivo',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --f-mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  /* page (outside the 16:9 stage) follows the viewer theme */
+  --page:#E7DFF2;--railInk:#3E055C;--railBg:rgba(255,255,255,.72);--railLine:rgba(78,9,115,.18);
+  box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--page:#14021F;--railInk:#E9DFF8;--railBg:rgba(46,4,71,.78);--railLine:rgba(196,176,232,.25)}}
+:root[data-theme="dark"]{--page:#14021F;--railInk:#E9DFF8;--railBg:rgba(46,4,71,.78);--railLine:rgba(196,176,232,.25)}
+html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;height:100%;position:relative;overflow:hidden;background:var(--page);font-family:var(--f-head);-webkit-font-smoothing:antialiased;color:var(--ink)}
+.mono,.svm{font-family:var(--f-mono)}
+#viewport{position:absolute;left:0;right:0;top:0;bottom:64px}
+body.fs #viewport{bottom:0}
+#stage{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0;border-radius:10px;overflow:hidden;box-shadow:0 30px 80px -30px rgba(46,4,71,.55)}
+body.fs #stage{border-radius:0;box-shadow:none}
+
+/* ================= SLIDE FRAME ================= */
+.slide{position:absolute;left:0;top:0;width:1920px;height:1080px;padding:72px 96px 80px;display:flex;flex-direction:column;overflow:hidden;opacity:0;visibility:hidden;transition:opacity .55s ease,visibility 0s linear .55s}
+.slide.active{opacity:1;visibility:visible;transition:opacity .55s ease}
+.slide::after{content:"";position:absolute;left:0;right:0;bottom:0;height:8px;background:linear-gradient(90deg,var(--deeper),var(--purple) 22%,var(--mid2) 50%,var(--lilac) 78%,var(--goldD))}
+.dark{background:radial-gradient(120% 95% at 80% 12%,var(--mid) 0%,var(--deep) 46%,var(--deeper) 100%);color:#fff;--acc:var(--lilac);--trk:rgba(196,176,232,.25)}
+.light{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);color:var(--ink);--acc:var(--purple);--trk:var(--hair)}
+
+.top{display:flex;justify-content:space-between;align-items:center;font:500 24px/1 var(--f-mono);letter-spacing:.18em;text-transform:uppercase}
+.eyebrow{color:var(--gold)}.dark .eyebrow{color:var(--goldD)}
+.top .right{display:flex;gap:44px;color:var(--muted2)}.dark .top .right{color:rgba(196,176,232,.85)}
+h1,h2{font-weight:900;letter-spacing:-.035em;line-height:1.0;margin:30px 0 0}
+h2{font-size:72px}
+h1 .l2,h2 .l2{display:block;color:var(--purple)}.dark h1 .l2,.dark h2 .l2{color:var(--lilac)}
+.body{flex:1;min-height:0;margin-top:36px;display:grid;gap:36px}
+.foot{display:flex;justify-content:space-between;align-items:flex-end;gap:48px;margin-top:26px;font-size:26px;line-height:1.3}
+.foot b{font-weight:800;max-width:1300px}
+.foot .src{font:400 24px var(--f-mono);color:var(--muted2);white-space:nowrap}.dark .foot .src{color:rgba(196,176,232,.75)}
+
+/* ================= COMPONENTS ================= */
+.card{background:#fff;border-radius:14px;border:1px solid var(--hair2);box-shadow:0 22px 50px -24px rgba(78,9,115,.38),0 2px 6px rgba(78,9,115,.06);padding:28px 32px;position:relative;min-height:0}
+.dark .card{background:rgba(255,255,255,.06);border:1px solid rgba(196,176,232,.22);box-shadow:0 30px 60px -30px rgba(0,0,0,.55)}
+.col{display:flex;flex-direction:column;gap:18px}
+.row{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.lab{font:500 24px/1.2 var(--f-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted2)}
+.dark .lab{color:rgba(196,176,232,.9)}
+p{font-size:28px;line-height:1.38;margin:0;color:var(--muted)}.dark p{color:rgba(238,232,246,.82)}
+p b{color:var(--ink)}.dark p b{color:#fff}
+.chip{display:inline-flex;align-items:center;gap:10px;padding:10px 20px;border-radius:999px;font:500 24px/1 var(--f-mono);letter-spacing:.04em;background:var(--bg2);color:var(--purple);border:1px solid var(--hair);white-space:nowrap}
+.dark .chip{background:rgba(196,176,232,.14);color:#EEE8F6;border-color:rgba(196,176,232,.32)}
+.chip i{width:14px;height:14px;border-radius:50%;display:inline-block;background:var(--c)}
+.chip b{color:var(--gold)}.dark .chip b{color:var(--goldD)}
+.btn{font:650 24px/1 var(--f-head);padding:15px 26px;border-radius:999px;border:0;background:var(--purple);color:#fff;cursor:pointer;display:inline-flex;gap:12px;align-items:center;transition:transform .2s var(--ease),background .2s;white-space:nowrap}
+.btn:hover{transform:translateY(-2px)}
+.btn.ghost{background:transparent;color:var(--purple);border:2px solid var(--lilac);padding:13px 24px}
+.btn.on{background:var(--gold);color:#fff}
+.dark .btn{background:var(--lilac);color:var(--deeper)}
+.dark .btn.ghost{background:transparent;color:#EEE8F6;border-color:rgba(196,176,232,.5)}
+.dark .btn.on{background:var(--goldD);color:var(--deeper)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--goldD);outline-offset:3px}
+.ro{display:flex;flex-direction:column;gap:8px;min-width:0}
+.ro .k{font:500 24px/1.1 var(--f-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted2)}
+.dark .ro .k{color:rgba(196,176,232,.85)}
+.ro .v{font:800 58px/1 var(--f-head);letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.ro .v.pur{color:var(--purple)}.dark .ro .v.pur{color:var(--lilac)}
+.ro .v.gold{color:var(--gold)}.dark .ro .v.gold{color:var(--goldD)}
+.ro .v.ok{color:var(--ok)}.dark .ro .v.ok{color:var(--mint)}
+.ro .v.bad{color:var(--red2)}
+.ctl{display:grid;grid-template-columns:150px 1fr 120px;align-items:center;gap:22px}
+.ctl label{font:500 24px/1 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.dark .ctl label{color:rgba(196,176,232,.9)}
+.ctl output{font:700 26px/1 var(--f-mono);text-align:right;font-variant-numeric:tabular-nums}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:40px;background:transparent;cursor:pointer;margin:0}
+input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:8px;background:linear-gradient(90deg,var(--acc) var(--p,0%),var(--trk) var(--p,0%))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:32px;height:32px;border-radius:50%;background:#fff;border:7px solid var(--acc);margin-top:-12px;box-shadow:0 4px 14px rgba(46,4,71,.35)}
+input[type=range]::-moz-range-track{height:8px;border-radius:8px;background:var(--trk)}
+input[type=range]::-moz-range-progress{height:8px;border-radius:8px;background:var(--acc)}
+input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:7px solid var(--acc)}
+.callout{display:flex;gap:20px;align-items:center;padding:20px 28px;border-radius:14px;background:var(--purple);color:#fff;font-size:28px;line-height:1.3;font-weight:600}
+.dark .callout{background:var(--lilac);color:var(--deeper)}
+.num-card{display:flex;flex-direction:column;gap:14px;padding:28px 30px}
+.num-card .n{font:850 64px/1 var(--f-head);color:var(--gold);font-variation-settings:'wdth' 115}
+.dark .num-card .n{color:var(--goldD)}
+.num-card h3{margin:0;font-size:34px;font-weight:800;letter-spacing:-.02em}
+.num-card p{font-size:26px}
+.num-card.tall{justify-content:space-between}
+.num-card.tall .n{font-size:132px;line-height:.85;letter-spacing:-.04em}
+.num-card.tall p{font-size:29px;line-height:1.32}
+.num-card .bar{height:6px;border-radius:6px;background:linear-gradient(90deg,var(--purple),var(--lilac));margin:6px 0 2px}
+.mega{font-weight:900;font-size:220px;line-height:.82;letter-spacing:-.05em;font-variation-settings:'wdth' 125;font-stretch:125%;background:linear-gradient(100deg,#fff 10%,var(--lilac) 60%,var(--goldD) 100%);-webkit-background-clip:text;background-clip:text;color:transparent;margin-left:-8px}
+.hero-num{font-weight:900;font-size:232px;line-height:.85;letter-spacing:-.05em;font-variation-settings:'wdth' 118;font-variant-numeric:tabular-nums;color:#fff}
+.hero-num small{font-size:120px;color:var(--lilac)}
+.li{display:grid;grid-template-columns:48px 1fr;gap:16px;align-items:start;font-size:32px;line-height:1.35;color:var(--muted)}
+.li .m{font:800 30px/1.2 var(--f-head)}
+.li.no .m{color:var(--red2)}.li.yes .m{color:var(--ok)}
+.li b{color:var(--ink)}
+
+/* ================= MOTION ================= */
+.r{opacity:0;transform:translateY(26px);transition:opacity .76s var(--ease),transform .76s var(--ease)}
+.r.in{opacity:1;transform:none}
+[data-step]{opacity:0;transform:translateY(26px);transition:opacity .76s var(--ease),transform .76s var(--ease)}
+[data-step].on{opacity:1;transform:none}
+
+/* ================= SLIDE-SPECIFIC · FlashAttention deck ================= */
+.hero{flex:1;display:grid;grid-template-columns:1fr 700px;align-items:center;gap:40px;min-height:0}
+h1{font-size:60px;font-weight:850;letter-spacing:-.03em;line-height:1.05;margin-top:40px;max-width:1000px}
+.mega.two{font-size:168px;line-height:.86;font-variation-settings:'wdth' 112;font-stretch:112%}
+.chips{display:flex;flex-wrap:wrap;gap:14px;margin-top:44px;max-width:1040px}
+.svm{font-family:var(--f-mono)}
+.sva{font-family:var(--f-head)}
+.stack{display:flex;flex-direction:column;gap:16px;min-height:0}
+.ros{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.ros.two{grid-template-columns:1fr 1fr}
+.btnrow{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+.btn.sm{padding:12px 20px}
+.math{font:500 26px/1.5 var(--f-mono);color:var(--ink)}
+.dark .math{color:#EEE8F6}
+.math .g{color:var(--gold)}.dark .math .g{color:var(--goldD)}
+.math .p{color:var(--purple);font-weight:700}.dark .math .p{color:var(--lilac)}
+.math .ok{color:var(--ok)}.dark .math .ok{color:var(--mint)}
+.math .bad{color:var(--red2)}.dark .math .bad{color:#FF9A9A}
+.fx{font:600 30px/1.35 var(--f-mono);color:var(--purple);letter-spacing:-.01em}
+.dark .fx{color:var(--lilac)}
+.verdict{display:inline-flex;align-items:center;gap:10px;padding:8px 18px;border-radius:999px;font:600 24px/1 var(--f-mono);letter-spacing:.06em;text-transform:uppercase}
+.verdict.bad{background:rgba(204,75,75,.12);color:var(--red2);border:1px solid rgba(204,75,75,.4)}
+.verdict.ok{background:rgba(47,138,92,.12);color:var(--ok);border:1px solid rgba(47,138,92,.4)}
+.dark .verdict.ok{background:rgba(156,232,192,.12);color:var(--mint);border-color:rgba(156,232,192,.4)}
+.dark .verdict.bad{background:rgba(204,75,75,.18);color:#FFB0B0;border-color:rgba(255,154,154,.45)}
+
+/* formula / statement cards */
+.stmt{display:grid;grid-template-columns:70px 1fr;gap:18px;align-items:center;padding:20px 26px}
+.stmt .k{font:850 46px/1 var(--f-head);color:var(--gold);font-variation-settings:'wdth' 115}
+.dark .stmt .k{color:var(--goldD)}
+.stmt h3{margin:0 0 4px;font-size:30px;font-weight:800;letter-spacing:-.02em}
+.stmt p{font-size:26px;line-height:1.3}
+
+/* issue cards */
+.issue{display:grid;grid-template-columns:64px 1fr;gap:18px;align-items:start;padding:20px 26px}
+.issue .k{font:850 44px/1 var(--f-head);color:var(--gold);font-variation-settings:'wdth' 115}
+.dark .issue .k{color:var(--goldD)}
+.issue h3{margin:0 0 4px;font-size:30px;font-weight:800;letter-spacing:-.02em}
+.issue p{font-size:25px;line-height:1.3}
+
+/* memory tier rows */
+.tier{display:grid;grid-template-columns:1fr;gap:4px;padding:14px 24px;border-left:6px solid var(--hair);border-radius:12px;background:rgba(255,255,255,.55);transition:background .5s var(--ease),border-color .5s var(--ease),box-shadow .5s var(--ease)}
+.tier .hd{display:flex;justify-content:space-between;align-items:baseline;gap:16px}
+.tier h3{margin:0;font-size:29px;font-weight:800;letter-spacing:-.02em}
+.tier .sz{font:500 24px var(--f-mono);color:var(--gold);white-space:nowrap}
+.tier p{font-size:25px;line-height:1.28}
+.tier.hl{background:#fff;border-left-color:var(--gold);box-shadow:0 22px 50px -24px rgba(78,9,115,.38)}
+
+/* code panel */
+.code{background:#1E0532;border-radius:14px;padding:22px 0;font:400 22px/1.42 var(--f-mono);color:#E9E1F5;border:1px solid rgba(196,176,232,.22);box-shadow:0 30px 60px -30px rgba(46,4,71,.6);overflow:hidden;min-height:0}
+.code .ln{display:grid;grid-template-columns:56px 1fr;padding:0 24px 0 0;white-space:pre;transition:opacity .45s var(--ease),background .45s var(--ease)}
+.code .ln::before{content:attr(data-n);text-align:right;padding-right:18px;color:rgba(196,176,232,.45)}
+.code.focus .ln{opacity:.32}
+.code.focus .ln.hl{opacity:1;background:rgba(220,169,114,.14)}
+.code .kw{color:#DCA972}.code .nu{color:#9CE8C0}.code .fn{color:#C4B0E8}.code .cm{color:rgba(196,176,232,.62);font-style:italic}.code .st{color:#F2C9A0}
+.ann{display:grid;grid-template-columns:110px 1fr;gap:16px;align-items:start;padding:18px 24px}
+.ann .k{font:600 24px/1.2 var(--f-mono);color:var(--gold);letter-spacing:.04em}
+.dark .ann .k{color:var(--goldD)}
+.ann p{font-size:25px;line-height:1.3}
+
+/* SVG text classes */
+svg text{font-family:var(--f-head)}
+.t24{font:500 24px var(--f-mono)}
+.t26b{font:800 26px var(--f-head)}
+.t30b{font:800 30px var(--f-head)}
+.t34b{font:850 34px var(--f-head)}
+
+/* tier / element highlight in SVGs */
+.pyr .tr path{transition:fill .5s,stroke .5s,opacity .5s}
+.pyr.f .tr{opacity:.35;transition:opacity .5s}
+.pyr.f .tr.hl{opacity:1}
+.chip-svg .sm rect.box{transition:stroke .4s,fill .4s}
+.chip-svg .tc{transition:fill .3s}
+
+/* standard attention pipeline */
+#stdSvg .kn rect{fill:rgba(255,255,255,.07);stroke:rgba(196,176,232,.45);stroke-width:2;transition:all .4s}
+#stdSvg .kn.hl rect{fill:rgba(220,169,114,.2);stroke:#DCA972;stroke-width:3}
+#stdSvg .kn.dim{opacity:.35}
+#stdSvg .kn{transition:opacity .4s}
+
+/* evolution cards */
+.ev{display:flex;flex-direction:column;gap:10px;padding:24px 26px}
+.ev .yr{font:850 56px/1 var(--f-head);color:var(--gold);letter-spacing:-.03em;font-variation-settings:'wdth' 112}
+.ev h3{margin:0;font-size:30px;font-weight:800;letter-spacing:-.02em}
+.ev .gpu{font:500 24px var(--f-mono);color:var(--muted2);letter-spacing:.06em;text-transform:uppercase}
+.ev p{font-size:24px;line-height:1.3}
+.ev .big{font:850 44px/1 var(--f-head);color:var(--purple);letter-spacing:-.03em;font-variant-numeric:tabular-nums;margin-top:auto}
+.ev .big small{font:500 24px var(--f-mono);color:var(--muted2);letter-spacing:0;display:block;margin-top:6px}
+
+.sum{display:grid;grid-template-columns:76px 1fr;gap:18px;align-items:start;padding:26px 28px}
+.sum .k{font:850 60px/1 var(--f-head);color:var(--goldD);font-variation-settings:'wdth' 115}
+.sum p{font-size:28px;line-height:1.34}
+.ovl{position:absolute;bottom:18px;left:38.5%;display:flex;gap:12px;z-index:2}
+/* by-hand trace table */
+table.trace{width:100%;border-collapse:collapse;font:500 26px/1.2 var(--f-mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+table.trace th{font:500 24px var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted2);text-align:right;padding:12px 14px;border-bottom:2px solid var(--hair)}
+table.trace th:nth-child(-n+3),table.trace td:nth-child(-n+3){text-align:left}
+table.trace td{padding:13px 14px;text-align:right;border-bottom:1px solid var(--hair2);white-space:nowrap}
+table.trace td:first-child{font-weight:700;color:var(--purple)}
+table.trace td.hlc{color:var(--gold);font-weight:700}
+table.trace td.dim{color:var(--muted2)}
+table.trace tr.ex td{color:var(--ok);font-weight:700;border-bottom:0}
+table.trace tr[data-step]{transform:none}
+table.trace tr[data-step]:not(.on){opacity:.08}
+table.trace tr[data-step].on{opacity:1;background:transparent;transition:opacity .6s var(--ease)}
+/* ================= CHROME: rail, pills, slide panel ================= */
+#rail{position:absolute;left:0;right:0;bottom:0;height:64px;display:flex;align-items:center;justify-content:center;gap:18px;color:var(--railInk);font:500 14px var(--f-mono);padding:0 16px}
+#rail button{background:var(--railBg);border:1px solid var(--railLine);color:var(--railInk);width:40px;height:40px;border-radius:50%;cursor:pointer;font-size:18px;display:grid;place-items:center}
+#dots{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
+#dots button{width:10px;height:10px;padding:0;border-radius:50%;background:var(--railLine);border:0}
+#dots button.cur{background:var(--railInk);width:26px;border-radius:6px}
+#dots button.hid{opacity:.25}
+#count{min-width:150px;letter-spacing:.06em}
+body.fs #rail{display:none}
+.pill{position:absolute;z-index:5;background:var(--railBg);color:var(--railInk);border:1px solid var(--railLine);border-radius:999px;padding:10px 18px;font:500 14px var(--f-mono);cursor:pointer;backdrop-filter:blur(8px);transition:opacity .4s}
+#fsbtn{right:20px;bottom:76px}#hidebtn{right:210px;bottom:76px}
+body.fs #fsbtn,body.fs #hidebtn{bottom:20px}
+body.idle .pill{opacity:0;pointer-events:none}
+body.idle{cursor:none}
+#notes{position:absolute;left:20px;bottom:76px;z-index:6;width:min(560px,60vw);max-height:40vh;overflow:auto;background:var(--railBg);backdrop-filter:blur(14px);border:1px solid var(--railLine);border-radius:14px;padding:14px 18px;color:var(--railInk);font:400 15px/1.5 var(--f-head);display:none}
+#notes.open{display:block}#notes h4{margin:0 0 6px;font:700 12px var(--f-mono);letter-spacing:.12em;text-transform:uppercase;opacity:.7}
+body.fs #notes{bottom:20px}
+#panel{position:absolute;right:20px;bottom:130px;z-index:6;width:340px;max-height:70vh;overflow:auto;background:var(--railBg);backdrop-filter:blur(14px);border:1px solid var(--railLine);border-radius:14px;padding:14px;color:var(--railInk);font:500 13px var(--f-mono);display:none}
+#panel.open{display:block}
+#panel label{display:flex;gap:10px;align-items:center;padding:6px 4px;cursor:pointer}
+#panel h4{margin:2px 4px 8px;font:700 12px var(--f-mono);letter-spacing:.12em;text-transform:uppercase;opacity:.7}
+@media (max-width:640px){#dots{display:none}#count{min-width:0}#hidebtn{display:none}}
+@media (prefers-reduced-motion:reduce){.r,[data-step],.slide{transition:none!important}}
+@media print{
+  @page{size:1920px 1080px;margin:0}
+  :root{padding:0}
+  html,body{height:auto;overflow:visible;background:#fff}
+  #viewport{position:static}
+  #stage{position:static;transform:none!important;width:1920px;height:auto;box-shadow:none;border-radius:0;overflow:visible}
+  .slide{position:relative;opacity:1!important;visibility:visible!important;break-after:page;page-break-after:always}
+  .slide.hidden-slide{display:none}
+  .r,[data-step]{opacity:1!important;transform:none!important}
+  #rail,.pill,#panel,#notes{display:none!important}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+</style>
+</head>
+<body>
+<div id="viewport"><div id="stage">
+
+<!-- ============ 1 · TITLE (dark) ============ -->
+<section class="slide dark" data-id="title" data-title="Title" data-notes="FlashAttention gives exactly the same output as standard attention. It is not an approximation. What changes is where the numbers live while they are being computed. The visual on the right is the whole idea in miniature: a gold tile sweeps across the score table, but the table itself is never stored.">
+  <div class="top r"><span class="eyebrow">Explainer · Transformers under the hood</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <div class="hero">
+    <div>
+      <div class="mega two r">Flash<br>Attention</div>
+      <h1 class="r">Same attention. Same answer.<span class="l2">Rebuilt around GPU memory.</span></h1>
+      <div class="chips r"><span class="chip"><b>1</b> Attention</span><span class="chip"><b>2</b> GPU memory</span><span class="chip"><b>3</b> Why it was slow</span><span class="chip"><b>4</b> Tiling</span><span class="chip"><b>5</b> Online softmax</span><span class="chip"><b>6</b> Results</span></div>
+    </div>
+    <div class="r"><svg id="heroSvg" viewBox="0 0 700 700" width="680" height="680" aria-hidden="true"></svg></div>
+  </div>
+  <div class="foot r"><b>Press → or Space to begin. F full screen · H hide slides · N notes.</b><span class="src">Dao et al., 2022 · 2023 · 2024 · 2026</span></div>
+</section>
+
+<!-- ============ 2 · ATTENTION RECAP (light) ============ -->
+<section class="slide light" data-id="recap" data-title="Attention in one minute" data-notes="Each row is one token asking: which other tokens matter to me? Click any row. 'it' looks hardest at 'cat'. Three steps: score, softmax, mix. Land the last line: the score table is N by N.">
+  <div class="top r"><span class="eyebrow">01 · Attention in one minute</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Every token scores every other token.<span class="l2">That makes an N × N table.</span></h2>
+  <div class="body" style="grid-template-columns:780px 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Attention weights · click a row</div><canvas id="recapCv" width="716" height="560" data-interactive></canvas></div>
+    <div class="col" style="gap:16px">
+      <div class="card stmt" data-step="1"><span class="k">1</span><div><h3>Score · S = QKᵀ / √d</h3><p>Each query dot-products with every key. One number per pair.</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">2</span><div><h3>Normalise · P = softmax(S)</h3><p>Each row becomes weights that sum to 1.</p></div></div>
+      <div class="card stmt" data-step="3"><span class="k">3</span><div><h3>Mix · O = PV</h3><p>Each output is a weighted blend of the value vectors.</p></div></div>
+      <div data-step="4"><div class="callout">10 tokens → 100 scores. 100,000 tokens → 10 billion.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>The score table S, and its softmax P, are both N × N.</b><span class="src">Vaswani et al., 2017 · illustrative weights</span></div>
+</section>
+
+<!-- ============ 3 · QUADRATIC WALL (dark) ============ -->
+<section class="slide dark" data-id="quad" data-title="The quadratic wall" data-notes="Drag the context length. Q, K, V and O grow in a straight line. The score tables grow with the square. At 64K tokens and 32 heads, one layer's S and P need over 500 GB in FP16, many times an 80 GB GPU.">
+  <div class="top r"><span class="eyebrow">02 · The quadratic wall</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Double the tokens, quadruple the table.<span class="l2">Score memory grows as N².</span></h2>
+  <div class="body" style="grid-template-columns:1.12fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Memory for one layer · FP16 · batch 1 · d = 128</div><canvas id="quadCv" width="840" height="520"></canvas></div>
+    <div class="col" style="gap:18px">
+      <div class="card col r" style="gap:10px">
+        <div class="ctl"><label for="qN">Tokens</label><input type="range" id="qN" min="9" max="17" step="1" value="13"><output id="qNv">8,192</output></div>
+        <div class="ctl"><label for="qH">Heads</label><input type="range" id="qH" min="8" max="64" step="8" value="32"><output id="qHv">32</output></div>
+      </div>
+      <div class="card r"><div class="ros">
+        <div class="ro"><span class="k">S + P</span><span class="v bad" id="qS" style="font-size:48px;white-space:nowrap">0</span></div>
+        <div class="ro"><span class="k">Q K V O</span><span class="v pur" id="qQ" style="font-size:48px;white-space:nowrap">0</span></div>
+        <div class="ro"><span class="k">Ratio</span><span class="v gold" id="qR" style="font-size:48px;white-space:nowrap">0</span></div>
+      </div><p id="qTxt" style="font-size:26px;margin-top:16px"></p></div>
+      <div data-step="1"><div class="callout">The N² tables, not the model, decide how long a context fits.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Linear inputs, quadratic intermediates. The intermediates win.</b><span class="src">Computed live · 2 bytes per FP16 value</span></div>
+</section>
+
+<!-- ============ 4 · MEMORY HIERARCHY (light) ============ -->
+<section class="slide light" data-id="hier" data-title="GPU memory hierarchy" data-notes="Walk down the pyramid with the arrow key. The key contrast is SRAM versus HBM: SRAM is about ten times faster but thousands of times smaller. Registers belong to one thread, SRAM to one SM, L2 to the whole chip, HBM is the GPU's main memory. Numbers are for an A100.">
+  <div class="top r"><span class="eyebrow">03 · GPU memory</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">A GPU has fast memory and big memory.<span class="l2">Never both in the same place.</span></h2>
+  <div class="body" style="grid-template-columns:800px 1fr">
+    <div class="card r" style="padding:18px 20px"><svg id="pyrSvg" class="pyr" viewBox="0 0 760 580" width="758" height="578" aria-hidden="true"></svg></div>
+    <div class="col" style="gap:12px">
+      <div class="tier" data-step="1"><div class="hd"><h3>Registers</h3><span class="sz">256 KB / SM</span></div><p>Private to each thread. Hold the values being multiplied right now.</p></div>
+      <div class="tier" data-step="2"><div class="hd"><h3>SRAM · shared memory</h3><span class="sz">192 KB / SM · ~19 TB/s</span></div><p>Scratchpad shared by one SM's threads. You choose what goes in.</p></div>
+      <div class="tier" data-step="3"><div class="hd"><h3>L2 cache</h3><span class="sz">40 MB · whole chip</span></div><p>Shared by all SMs. Mostly managed by hardware, not your code.</p></div>
+      <div class="tier" data-step="4"><div class="hd"><h3>HBM · “GPU memory”</h3><span class="sz">40–80 GB · 1.5–2.0 TB/s</span></div><p>Off-chip stacks. Weights, activations, Q, K, V live here.</p></div>
+      <div class="tier" data-step="5"><div class="hd"><h3>CPU DRAM</h3><span class="sz">&gt;1 TB · 12.8 GB/s</span></div><p>Host memory over PCIe. Far too slow for the inner loop.</p></div>
+    </div>
+  </div>
+  <div class="foot r"><b>One SM’s SRAM: ~10× faster than HBM, ~200,000× smaller.</b><span class="src">NVIDIA A100 · Dao et al., 2022</span></div>
+</section>
+
+<!-- ============ 5 · INSIDE THE CHIP (dark) ============ -->
+<section class="slide dark" data-id="chip" data-title="Inside the chip" data-notes="An A100 has 108 streaming multiprocessors. Each is a small worker with its own registers, SRAM and tensor cores. HBM sits beside the die. Every GPU kernel does the same three things: load from HBM, compute on chip, store back to HBM. Press the arrow to walk through load, compute, store.">
+  <div class="top r"><span class="eyebrow">03 · GPU memory</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">108 small, fast desks on the chip.<span class="l2">One big warehouse beside it.</span></h2>
+  <div class="body" style="grid-template-rows:1fr auto;gap:20px">
+    <div class="card r" style="padding:12px 18px"><svg id="chipSvg" class="chip-svg" viewBox="0 0 1700 420" width="1690" height="418" aria-hidden="true"></svg></div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px">
+      <div class="card" data-step="1"><div class="lab">1 · Load</div><p style="margin-top:6px"><b>HBM → SRAM.</b> Inputs cross the narrow road onto the chip.</p></div>
+      <div class="card" data-step="2"><div class="lab">2 · Compute</div><p style="margin-top:6px"><b>Tensor cores</b> work from registers and SRAM.</p></div>
+      <div class="card" data-step="3"><div class="lab">3 · Store</div><p style="margin-top:6px"><b>SRAM → HBM.</b> Results go back before the next kernel.</p></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Every kernel is one round trip: load, compute, store.</b><span class="src">NVIDIA A100 architecture · simplified</span></div>
+</section>
+
+<!-- ============ 6 · ROOFLINE (light) ============ -->
+<section class="slide light" data-id="roof" data-title="Compute vs memory bound" data-notes="The roofline. Below about 200 FLOPs per byte, an A100 cannot feed its tensor cores fast enough. Click each operation. Mask, softmax and dropout do roughly one FLOP per byte: they use a fraction of a percent of the chip. Even QK-transpose is memory bound when it has to write the N by N result.">
+  <div class="top r"><span class="eyebrow">04 · Compute vs memory</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">GPUs compute faster than they fetch.<span class="l2">So most attention steps just wait.</span></h2>
+  <div class="body" style="grid-template-columns:1.3fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Roofline · A100 · FP16</div><canvas id="roofCv" width="930" height="520"></canvas></div>
+    <div class="col" style="gap:18px">
+      <div class="card col r" style="gap:14px"><div class="lab">Pick an operation</div><div class="btnrow" id="roofBtns"></div></div>
+      <div class="card r"><div class="ros">
+        <div class="ro"><span class="k">Intensity</span><span class="v pur" id="rfI">0</span></div>
+        <div class="ro"><span class="k">TFLOP/s</span><span class="v gold" id="rfT">0</span></div>
+        <div class="ro"><span class="k">Of peak</span><span class="v" id="rfP">0</span></div>
+      </div><div style="margin-top:16px"><span class="verdict bad" id="rfV">memory-bound</span></div></div>
+      <div data-step="1"><div class="callout">Below ~200 FLOPs per byte, tensor cores sit idle waiting on HBM.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Attention's cheap steps are bound by memory, not math.</b><span class="src">312 TFLOP/s · 1,555 GB/s · roofline model</span></div>
+</section>
+
+<!-- ============ 7 · STANDARD PIPELINE (dark) ============ -->
+<section class="slide dark" data-id="std" data-title="Standard attention pipeline" data-notes="This is how a plain PyTorch implementation runs attention: five separate kernels. Watch the N by N block. QK-transpose writes it to HBM, mask reads it and writes it again, softmax reads and writes, dropout reads and writes, and the final matmul reads it once more. Eight trips of an N-squared tensor per layer, per forward pass.">
+  <div class="top r"><span class="eyebrow">05 · Why standard attention is slow</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Standard attention writes N² to HBM.<span class="l2">Then reads it back, kernel after kernel.</span></h2>
+  <div class="body" style="grid-template-rows:1fr auto;gap:20px">
+    <div class="card r" style="padding:12px 18px"><svg id="stdSvg" viewBox="0 0 1700 430" width="1690" height="428" aria-hidden="true"></svg></div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px">
+      <div class="card" data-step="1"><div class="lab">Kernel 1</div><p style="margin-top:6px"><b>QKᵀ writes S</b>, the full N × N table, to HBM.</p></div>
+      <div class="card" data-step="2"><div class="lab">Kernels 2–4</div><p style="margin-top:6px"><b>Mask, softmax, dropout</b> each read N² and write N².</p></div>
+      <div class="card" data-step="3"><div class="lab">Kernel 5</div><p style="margin-top:6px"><b>PV reads P</b> one last time to make the output.</p></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Eight N² trips through HBM, for one layer's forward pass.</b><span class="src">Standard implementation · Dao et al., 2022, Alg. 0</span></div>
+</section>
+
+<!-- ============ 8 · FOUR PROBLEMS (light) ============ -->
+<section class="slide light" data-id="issues" data-title="Four problems" data-notes="Left: a roofline model of the five kernels for GPT-2 medium on an A100. Purple is time the tensor cores are busy. Red hatching is time spent waiting for HBM. The math is a sliver. Then reveal the four problems one by one.">
+  <div class="top r"><span class="eyebrow">05 · Why standard attention is slow</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Four reasons standard attention hurts.<span class="l2">None of them is the math.</span></h2>
+  <div class="body" style="grid-template-columns:1fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Forward time per kernel · modelled</div><canvas id="tlCv" width="780" height="470"></canvas>
+      <div class="row" style="gap:28px"><span class="chip"><i style="--c:#4E0973"></i>Tensor cores busy</span><span class="chip"><i style="--c:#CC4B4B"></i>Waiting on HBM</span></div></div>
+    <div class="col" style="gap:14px">
+      <div class="card issue" data-step="1"><span class="k">1</span><div><h3>Memory grows as N²</h3><p>S and P must fit in HBM. Long contexts simply run out.</p></div></div>
+      <div class="card issue" data-step="2"><span class="k">2</span><div><h3>Cheap steps, slow steps</h3><p>Mask, softmax and dropout do ~1 FLOP per byte. Cores idle.</p></div></div>
+      <div class="card issue" data-step="3"><span class="k">3</span><div><h3>One kernel per step</h3><p>Nothing stays on chip between steps. Every result detours via HBM.</p></div></div>
+      <div class="card issue" data-step="4"><span class="k">4</span><div><h3>Training stores P again</h3><p>Backward needs P, so the N² table is kept for gradients.</p></div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>The bottleneck is moving bytes, not multiplying numbers.</b><span class="src">GPT-2 medium shape · A100 roofline model</span></div>
+</section>
+
+<!-- ============ 9 · TILING (dark) ============ -->
+<section class="slide dark" data-id="tile" data-title="The idea: tiling" data-notes="The fix: never build the table. Load one tile of Q into SRAM. Stream tiles of K and V past it. Each 4 by 4 corner of the score table is computed in SRAM, used to update the output, and thrown away. When the row of tiles is done, write the finished O tile once. Watch the counter: N-squared writes to HBM stays at zero.">
+  <div class="top r"><span class="eyebrow">06 · The idea</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Never build the full table.<span class="l2">Work tile by tile inside SRAM.</span></h2>
+  <div class="body" style="grid-template-rows:1fr auto;gap:20px">
+    <div class="card r" style="padding:10px 18px"><div class="ovl"><button class="btn sm" id="tlPlay">❚❚ Pause</button><button class="btn ghost sm" id="tlStep">Step ▸</button></div><svg id="tileSvg" viewBox="0 0 1700 440" width="1690" height="438" aria-hidden="true"></svg></div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px">
+      <div class="card" data-step="1"><div class="lab">1 · Hold</div><p style="margin-top:6px"><b>Load one Q tile.</b> It stays in SRAM for its whole row.</p></div>
+      <div class="card" data-step="2"><div class="lab">2 · Stream</div><p style="margin-top:6px"><b>K, V tiles flow past.</b> Each score tile is used, then dropped.</p></div>
+      <div class="card" data-step="3"><div class="lab">3 · Write once</div><p style="margin-top:6px"><b>Store the O tile.</b> The N × N table never reaches HBM.</p></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Fuse every step into one kernel, so scores never leave the chip.</b><span class="src">Dao et al., 2022 · loop order of FlashAttention-2</span></div>
+</section>
+
+<!-- ============ EASY 1 · SOFTMAX IS A PIE (light) ============ -->
+<section class="slide light" data-id="pie" data-title="Online softmax, simply · the pie" data-notes="Forget the maths for a moment. Softmax is just sharing a pie. Every key gets points for how well it matches the query, and its slice is its points divided by everyone's points. Watch what happens as keys arrive: every time a new one joins, everyone else's slice shrinks. That is the problem. You cannot cut the pie until you have seen everyone, and FlashAttention only sees a few keys at a time.">
+  <div class="top r"><span class="eyebrow">07 · Online softmax, simply</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Softmax splits attention like a pie.<span class="l2">Each slice depends on the whole total.</span></h2>
+  <div class="body" style="grid-template-columns:1.05fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Query “it” shares its attention</div><canvas id="pieCv" width="800" height="520"></canvas></div>
+    <div class="col" style="gap:16px">
+      <div class="card r"><div class="lab">In plain words</div><p style="margin-top:8px">Each key earns <b>points</b> for how well it matches the query. Its slice = <b>its points ÷ everyone’s points</b>.</p></div>
+      <div class="card stmt" data-step="1"><span class="k">1</span><div><h3>More points, bigger slice</h3><p>“cat” matches “it” best, so it gets the most.</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">2</span><div><h3>Every newcomer changes every slice</h3><p>Watch: each new key shrinks the others.</p></div></div>
+      <div data-step="3"><div class="callout">FlashAttention sees only a few keys at a time. How can it cut the pie?</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>To cut the pie fairly, you seem to need everyone first.</b><span class="src">Illustrative points · points = e^score</span></div>
+</section>
+
+<!-- ============ EASY 2 · KEEP A TALLY (dark) ============ -->
+<section class="slide dark" data-id="jars" data-title="Online softmax, simply · two jars" data-notes="Here is the way out, and it is something we do every day. To get an average, you do not need everyone in the room first. Keep a tally as people walk in, and divide at the end. FlashAttention keeps two jars per row. Jar one collects points. Jar two collects points times value. When the last block has gone by, divide jar two by jar one. That is exactly the softmax answer, without ever holding the whole row.">
+  <div class="top r"><span class="eyebrow">07 · Online softmax, simply</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Don't wait for everyone. Keep a tally.<span class="l2">Divide once, after the last key.</span></h2>
+  <div class="body" style="grid-template-columns:1.12fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Keys arrive in blocks</div><canvas id="jarCv" width="840" height="490"></canvas></div>
+    <div class="col" style="gap:16px">
+      <div class="card r"><div class="ros">
+        <div class="ro"><span class="k">Jar 1</span><span class="v pur" id="jr1">0</span></div>
+        <div class="ro"><span class="k">Jar 2</span><span class="v pur" id="jr2">0</span></div>
+        <div class="ro"><span class="k">Answer</span><span class="v gold" id="jrA">—</span></div>
+      </div></div>
+      <div class="card stmt" data-step="1"><span class="k">1</span><div><h3>Jar 1 collects points</h3><p>The running total: the bottom of the fraction.</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">2</span><div><h3>Jar 2 collects points × value</h3><p>The running mix: the top of the fraction.</p></div></div>
+      <div data-step="3"><div class="callout">Answer = jar 2 ÷ jar 1. Same as seeing every key at once.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Like a class average: keep a tally, divide at the end.</b><span class="src">On the GPU, value is a vector and jar 2 is the output O</span></div>
+</section>
+
+<!-- ============ EASY 3 · NEW LEADER (light) ============ -->
+<section class="slide light" data-id="leader" data-title="Online softmax, simply · new leader" data-notes="One wrinkle. Real points grow explosively, e to the score, and would overflow. So we measure every key against the current leader, the best score so far, and the leader always counts as one point. When a new, better leader shows up, every old point was measured on the old scale. The fix is to shrink both jars by the same factor, like zooming out a photo. Proportions stay the same: look at jar two divided by jar one, it does not change while shrinking. Then the new keys go in on the same scale.">
+  <div class="top r"><span class="eyebrow">07 · Online softmax, simply</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">A new leader? Shrink both jars.<span class="l2">Same factor for both, so nothing breaks.</span></h2>
+  <div class="body" style="grid-template-columns:1.12fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">The leader always counts as 1 point</div><canvas id="leadCv" width="840" height="490"></canvas></div>
+    <div class="col" style="gap:16px">
+      <div class="card r"><div class="ros">
+        <div class="ro"><span class="k">Leader</span><span class="v gold" id="ldL">—</span></div>
+        <div class="ro"><span class="k">Shrink by</span><span class="v pur" id="ldC">—</span></div>
+        <div class="ro"><span class="k">Jar 2 ÷ Jar 1</span><span class="v ok" id="ldR">—</span></div>
+      </div></div>
+      <div class="card stmt" data-step="1"><span class="k">1</span><div><h3>Why a leader?</h3><p>Real points explode. Counting the leader as 1 keeps them small.</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">2</span><div><h3>New leader, new scale</h3><p>Shrink both jars by one factor, like zooming out a photo.</p></div></div>
+      <div data-step="3"><div class="callout">The ratio doesn’t move while shrinking. The answer is safe.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Shrinking both jars equally keeps old and new keys on one scale.</b><span class="src">Illustrative scores · points = e^(score − leader)</span></div>
+</section>
+
+<!-- ============ EASY 4 · THREE MOVES (dark) ============ -->
+<section class="slide dark" data-id="moves" data-title="Online softmax, simply · three moves" data-notes="That is online softmax. Per row, for each block: check the leader and shrink if needed, add the new keys to the two jars, and after the last block, divide. The GPU keeps three small things per row in SRAM. The full maths, with the exact formulas and a worked table, is in Appendix A.">
+  <div class="top r"><span class="eyebrow">07 · Online softmax, simply</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Online softmax in three moves.<span class="l2">Check the leader, add, divide at the end.</span></h2>
+  <div class="body" style="grid-template-columns:1fr 760px;align-items:stretch">
+    <div class="col" style="gap:16px">
+      <div class="card sum r"><span class="k">1</span><p><b>Check the leader.</b> A bigger score arrived? Shrink both jars by one factor.</p></div>
+      <div class="card sum r"><span class="k">2</span><p><b>Add the new keys.</b> Points into jar 1, points × value into jar 2.</p></div>
+      <div class="card sum r"><span class="k">3</span><p><b>After the last block, divide.</b> Answer = jar 2 ÷ jar 1. Exact.</p></div>
+      <div data-step="1"><div class="callout">Per row, SRAM holds just a leader and two jars.</div></div>
+    </div>
+    <div class="card r" style="padding:14px 18px"><canvas id="movesCv" width="720" height="560"></canvas></div>
+  </div>
+  <div class="foot r"><b>Same answer as normal softmax, exactly. Full maths: Appendix A.</b><span class="src">Milakov &amp; Gimelshein, 2018 · Dao et al., 2022</span></div>
+</section>
+
+<!-- ============ 12 · ALGORITHM (light) ============ -->
+<section class="slide light" data-id="algo" data-title="The algorithm" data-notes="This is the forward pass in pseudo-code, in FlashAttention-2's loop order. Walk through the four annotations. The only extra output is L, one number per row, which the backward pass will need.">
+  <div class="top r"><span class="eyebrow">08 · The algorithm</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">One kernel. Q, K, V in. O out.<span class="l2">Everything else stays on chip.</span></h2>
+  <div class="body" style="grid-template-columns:1.3fr 1fr">
+    <div class="code r" id="algoCode" style="font-size:24px;line-height:1.58;padding-top:30px"></div>
+    <div class="col" style="gap:14px">
+      <div class="card ann" data-step="1"><span class="k">L1–3</span><p><b>Pin a Q tile.</b> Start m at −∞, ℓ and O at zero, all in SRAM.</p></div>
+      <div class="card ann" data-step="2"><span class="k">L4–6</span><p><b>Stream K, V tiles.</b> A small score tile S exists only on chip.</p></div>
+      <div class="card ann" data-step="3"><span class="k">L7–12</span><p><b>Online softmax.</b> Rescale old ℓ and O by c, then add the new block.</p></div>
+      <div class="card ann" data-step="4"><span class="k">L13–14</span><p><b>Divide once, write once.</b> Save O and L = m + log ℓ.</p></div>
+    </div>
+  </div>
+  <div class="foot r"><b>HBM sees Q, K, V, O and L. Never S, never P.</b><span class="src">After Dao, 2023, Algorithm 1 · simplified</span></div>
+</section>
+
+<!-- ============ 13 · IO COMPLEXITY (dark) ============ -->
+<section class="slide dark" data-id="io" data-title="HBM traffic" data-notes="Count the bytes. Standard attention moves Q, K, V, O plus eight N-squared tensors. FlashAttention moves Q and O once and re-reads K and V once per Q tile. The saving is about 4B over d. Bigger tiles, fewer trips. The paper measured nine times less HBM traffic on GPT-2 medium.">
+  <div class="top r"><span class="eyebrow">09 · Counting bytes</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Same FLOPs, far fewer bytes moved.<span class="l2">Bigger tiles mean fewer trips.</span></h2>
+  <div class="body" style="grid-template-columns:1.25fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">HBM traffic per layer · forward · FP16 · 32 heads</div><canvas id="ioCv" width="900" height="500"></canvas></div>
+    <div class="col" style="gap:16px">
+      <div class="card col r" style="gap:8px">
+        <div class="ctl"><label for="ioN">Tokens</label><input type="range" id="ioN" min="9" max="17" step="1" value="12"><output id="ioNv">4,096</output></div>
+        <div class="ctl"><label for="ioD">Head d</label><input type="range" id="ioD" min="5" max="8" step="1" value="6"><output id="ioDv">64</output></div>
+        <div class="ctl"><label for="ioB">Tile B</label><input type="range" id="ioB" min="5" max="8" step="1" value="7"><output id="ioBv">128</output></div>
+      </div>
+      <div class="card r"><div class="ros">
+        <div class="ro"><span class="k">Standard</span><span class="v bad" id="ioS">0</span></div>
+        <div class="ro"><span class="k">Flash</span><span class="v ok" id="ioF">0</span></div>
+        <div class="ro"><span class="k">Fewer</span><span class="v gold" id="ioR">0</span></div>
+      </div></div>
+      <div class="card r" style="padding:20px 26px"><div class="math"><span class="bad">std</span> ≈ 4Nd + 8N²<br><span class="ok">flash</span> ≈ 2Nd + 2N²d / B</div></div>
+      <div data-step="1"><div class="callout">Measured on GPT-2 medium: 40.3 GB → 4.4 GB of HBM traffic.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Saving ≈ 4B ÷ d. Tiles of 128 at d = 64 move ~8× fewer bytes.</b><span class="src">Element-count model · Dao et al., 2022, Fig. 2</span></div>
+</section>
+
+<!-- ============ 14 · BACKWARD / RECOMPUTE (light) ============ -->
+<section class="slide light" data-id="bwd" data-title="Backward: recompute" data-notes="Training needs P again in the backward pass. Standard attention saves the N by N matrix. FlashAttention saves only O and one number per row, L, then recomputes the score tiles on chip during backward. That costs more FLOPs, 75 versus 67 GFLOPs, but moves 9 times fewer bytes, and runs nearly 6 times faster.">
+  <div class="top r"><span class="eyebrow">10 · The backward pass</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Don't store P for the backward pass.<span class="l2">Recompute it on chip from Q, K, V.</span></h2>
+  <div class="body" style="grid-template-columns:1fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Saved for backward · N = 4,096 · d = 64</div><svg id="bwdSvg" viewBox="0 0 760 520" width="760" height="520" aria-hidden="true"></svg></div>
+    <div class="col" style="gap:16px">
+      <div class="card col r" style="gap:8px"><div class="lab">Forward + backward · GPT-2 medium · A100</div><canvas id="bwdCv" width="780" height="262"></canvas></div>
+      <div class="card r"><div class="ros">
+        <div class="ro"><span class="k">FLOPs</span><span class="v bad">+13%</span></div>
+        <div class="ro"><span class="k">HBM bytes</span><span class="v ok">−89%</span></div>
+        <div class="ro"><span class="k">Runtime</span><span class="v gold">5.7×</span></div>
+      </div></div>
+      <div data-step="1"><div class="callout">Spend FLOPs to save bytes: recompute beats reload.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Memory drops from O(N²) to O(N), and it still runs faster.</b><span class="src">Dao et al., 2022, Fig. 2 (left)</span></div>
+</section>
+
+<!-- ============ 15 · RESULTS (dark) ============ -->
+<section class="slide dark" data-id="results" data-title="Results" data-notes="The headline: the attention computation itself ran 7.6 times faster on GPT-2. End to end, training got 15 percent faster than the MLPerf 1.1 record for BERT-large, and 3 times faster for GPT-2. And because memory became linear, sequences of 16K and 64K became trainable.">
+  <div class="top r"><span class="eyebrow">11 · What it bought</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Same answer, much less waiting.<span class="l2">And context lengths that used to OOM.</span></h2>
+  <div class="body" style="grid-template-columns:1.05fr 1fr;align-items:center">
+    <div class="r"><div class="hero-num"><span id="resK">0.0</span><small>×</small></div><p style="margin-top:22px;font-size:30px">faster attention computation on GPT-2,<br>by never writing the N × N matrix to HBM.</p></div>
+    <div class="col" style="gap:14px">
+      <div class="card r" style="padding:22px 30px"><div class="ro"><span class="k">GPT-2 training · seq 1K</span><span class="v pur">3× faster</span></div><p style="margin-top:8px">Versus HuggingFace and Megatron-LM baselines.</p></div>
+      <div class="card r" style="padding:22px 30px"><div class="ro"><span class="k">BERT-large · seq 512</span><span class="v gold">15% faster</span></div><p style="margin-top:8px">Than the MLPerf 1.1 training speed record.</p></div>
+      <div class="card r" style="padding:22px 30px"><div class="ro"><span class="k">Path-X · seq 16K</span><span class="v ok">61.4%</span></div><p style="margin-top:8px">First Transformer above chance. 64K: 63.1%.</p></div>
+    </div>
+  </div>
+  <div class="foot r"><b>IO-awareness turned a memory wall into a speed-up.</b><span class="src">Dao et al., NeurIPS 2022</span></div>
+</section>
+
+<!-- ============ 16 · EVOLUTION (light) ============ -->
+<section class="slide light" data-id="evo" data-title="FA1 → FA4" data-notes="Same core idea for four generations; each version retunes it for new hardware. The bars show the share of the GPU's peak FLOPs that attention reaches. FlashAttention-1 hit 25 to 40 percent on A100. FlashAttention-4 reaches 71 percent on a B200, about 1.6 PFLOP/s.">
+  <div class="top r"><span class="eyebrow">12 · Four generations</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Same idea, retuned for each new GPU.<span class="l2">From 25–40% of peak to over 70%.</span></h2>
+  <div class="body" style="grid-template-rows:auto 1fr;gap:20px">
+    <div class="card r" style="padding:14px 24px"><canvas id="evoCv" width="1670" height="190"></canvas></div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px;min-height:0">
+      <div class="card ev r"><span class="yr">FA1</span><span class="gpu">2022 · A100</span><p><b>Tiling, online softmax, recompute.</b> The IO-aware idea.</p><div class="big">2–4×<small>vs standard attention</small></div></div>
+      <div class="card ev r"><span class="yr">FA2</span><span class="gpu">2023 · A100</span><p><b>Q in the outer loop.</b> Fewer non-matmul FLOPs, more parallel.</p><div class="big">~2×<small>vs FA1 · up to 73% peak</small></div></div>
+      <div class="card ev r"><span class="yr">FA3</span><span class="gpu">2024 · H100</span><p><b>Async copies and warp roles.</b> Overlaps load, matmul, softmax. FP8.</p><div class="big">740 TF/s<small>FP16 · 75% of peak</small></div></div>
+      <div class="card ev r"><span class="yr">FA4</span><span class="gpu">2026 · B200</span><p><b>Tensor memory, async MMA.</b> Hides the slow exp unit.</p><div class="big">1,613 TF/s<small>BF16 · 71% of peak</small></div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Hardware keeps shifting the bottleneck. The kernel follows it.</b><span class="src">Dao 2022, 2023 · Shah 2024 · Zadouri 2026</span></div>
+</section>
+
+<!-- ============ 17 · IN CODE (dark) ============ -->
+<section class="slide dark" data-id="code" data-title="Using it" data-notes="In practice you rarely write the kernel. PyTorch's scaled_dot_product_attention dispatches to a FlashAttention backend when the inputs allow it. You can force the backend, call the flash-attn library directly, or flip one argument in Hugging Face.">
+  <div class="top r"><span class="eyebrow">13 · Using it</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">You rarely write it yourself.<span class="l2">One call or one flag switches it on.</span></h2>
+  <div class="body" style="grid-template-columns:1.32fr 1fr">
+    <div class="code r" id="useCode"></div>
+    <div class="col" style="gap:14px">
+      <div class="card ann" data-step="1"><span class="k">L1–4</span><p><b>PyTorch SDPA</b> picks a fused kernel when shapes and dtype allow.</p></div>
+      <div class="card ann" data-step="2"><span class="k">L6–9</span><p><b>Force the Flash backend</b> to check you really get it.</p></div>
+      <div class="card ann" data-step="3"><span class="k">L11–14</span><p><b>flash-attn library.</b> Note the layout: batch, seq, heads, dim.</p></div>
+      <div class="card ann" data-step="4"><span class="k">L16–18</span><p><b>Hugging Face.</b> One argument when loading the model.</p></div>
+    </div>
+  </div>
+  <div class="foot r"><b>FP16 or BF16 tensors on a supported GPU, and it is on.</b><span class="src">PyTorch 2.x · flash-attn · transformers docs</span></div>
+</section>
+
+<!-- ============ 18 · LIMITS (light) ============ -->
+<section class="slide light" data-id="limits" data-title="What it is, what it isn't" data-notes="Be precise about the claim. FlashAttention is exact and makes memory linear. It does not reduce the amount of math, which is still quadratic. Long-context models still pay N squared in compute.">
+  <div class="top r"><span class="eyebrow">14 · Limits</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Still exact, still N² compute.<span class="l2">It moves the memory wall, not the math.</span></h2>
+  <div class="body" style="grid-template-columns:1.05fr 1fr">
+    <div class="card col r" style="gap:8px"><div class="lab">Growth with tokens · relative to N = 1K</div><canvas id="limCv" width="820" height="470"></canvas></div>
+    <div class="card col r" style="gap:22px;justify-content:center">
+      <div class="li yes"><span class="m">✓</span><span><b>Exact.</b> Same output as standard attention, up to rounding.</span></div>
+      <div class="li yes"><span class="m">✓</span><span><b>Linear memory</b> in sequence length.</span></div>
+      <div class="li no" data-step="1"><span class="m">✗</span><span><b>Not fewer FLOPs.</b> Compute still grows as N²d.</span></div>
+      <div class="li no" data-step="2"><span class="m">✗</span><span><b>Hardware-specific.</b> Each GPU generation needs new kernels.</span></div>
+      <div class="li no" data-step="3"><span class="m">✗</span><span><b>Constraints.</b> FP16/BF16 (or FP8), limited head sizes.</span></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Use it everywhere. Just don't expect it to make attention linear.</b><span class="src">Dao et al., 2022–2026 · model curves</span></div>
+</section>
+
+<!-- ============ 19 · 30 SECONDS (dark) ============ -->
+<section class="slide dark" data-id="sum" data-title="30-second summary" data-notes="If you remember one thing: attention was slow because of memory traffic, not math. FlashAttention computes the same thing in tiles, keeps the scores on chip, and fixes softmax as it goes.">
+  <div class="top r"><span class="eyebrow">Recap · 30 seconds</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">FlashAttention in 30 seconds.<span class="l2">Move less memory, get the same answer.</span></h2>
+  <div class="body" style="grid-template-columns:1fr 560px;align-items:center">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div class="card sum r"><span class="k">1</span><p><b>Standard attention</b> writes an N × N table to slow HBM, then reads it back, again and again.</p></div>
+      <div class="card sum r"><span class="k">2</span><p><b>GPUs wait on memory.</b> Fast SRAM is tiny, big HBM is ~10× slower.</p></div>
+      <div class="card sum r"><span class="k">3</span><p><b>Tile it.</b> Keep Q, K, V tiles and the score tile in SRAM. One fused kernel.</p></div>
+      <div class="card sum r"><span class="k">4</span><p><b>Online softmax</b> rescales as the max grows. Exact output, linear memory.</p></div>
+    </div>
+    <div class="r"><svg id="sumSvg" viewBox="0 0 700 700" width="540" height="540" aria-hidden="true"></svg></div>
+  </div>
+  <div class="foot r"><b>Attention was memory-bound. FlashAttention made it IO-aware.</b><span class="src">Dao et al., 2022</span></div>
+</section>
+
+<!-- ================= APPENDIX A · ONLINE SOFTMAX IN DETAIL ================= -->
+<!-- ============ 10 · THE CATCH (light) ============ -->
+<section class="slide light" data-id="catch" data-title="Appendix · The catch: softmax" data-notes="Here is the problem with tiles. Softmax divides by a sum over the whole row, and for safety it subtracts the row's maximum. A tile only sees part of the row. Drag the slider: after one or two blocks the weights are wrong, because the true maximum, 5.3, is still hiding in the last block.">
+  <div class="top r"><span class="eyebrow">Appendix A1 · Online softmax in detail</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Softmax needs the whole row.<span class="l2">A tile only sees part of it.</span></h2>
+  <div class="body" style="grid-template-columns:1.2fr 1fr">
+    <div class="card col r" style="gap:10px"><div class="lab">One row of 12 scores · 3 blocks of 4</div><canvas id="catchCv" width="880" height="420"></canvas>
+      <div class="ctl"><label for="ctB">Blocks seen</label><input type="range" id="ctB" min="1" max="3" step="1" value="1"><output id="ctBv">1 / 3</output></div></div>
+    <div class="col" style="gap:16px">
+      <div class="card r"><div class="lab">Safe softmax</div><div class="fx" style="margin-top:10px">pᵢ = e^(sᵢ − m) ÷ ℓ</div><p style="margin-top:8px">m = max of the row · ℓ = Σ e^(sⱼ − m)</p></div>
+      <div class="card stmt" data-step="1"><span class="k">m</span><div><h3>Needs the row maximum</h3><p>Without it e^s overflows: FP16 tops out near e^11.</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">ℓ</span><div><h3>Needs the sum over every key</h3><p>Every weight is divided by it.</p></div></div>
+      <div data-step="3"><div class="callout">Both are final only after the last tile, unless we fix them as we go.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Partial rows give wrong weights. We need a softmax that updates.</b><span class="src">Milakov &amp; Gimelshein, 2018 · toy scores</span></div>
+</section>
+
+<!-- ============ NEW A · SAFE SOFTMAX (dark) ============ -->
+<section class="slide dark" data-id="safe" data-title="Appendix · Online softmax · subtract the max" data-notes="Before the online trick, one fact. Softmax does not care if you add the same number to every score: the factor e to the k appears on the top and the bottom and cancels. Drag the shift. The raw exponentials overflow FP16 past about e to the 11, but the softmax bars never move. So we always subtract the max, which makes the biggest term exactly 1. The consequence: if the max changes, only a common factor changes.">
+  <div class="top r"><span class="eyebrow">Appendix A2 · Subtract the max</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Subtract the max: same answer.<span class="l2">But every number stays at most 1.</span></h2>
+  <div class="body" style="grid-template-columns:1.12fr 1fr">
+    <div class="card col r" style="gap:10px"><div class="lab">Four scores · shift them all by k</div><canvas id="safeCv" width="840" height="430" data-interactive></canvas>
+      <div class="ctl"><label for="sfK">Shift k</label><input type="range" id="sfK" min="-4" max="10" step="1" value="0"><output id="sfKv">+0</output></div></div>
+    <div class="col" style="gap:16px">
+      <div class="card r"><div class="ros two">
+        <div class="ro"><span class="k">Largest e^s</span><span class="v" id="sfBig" style="font-size:52px;white-space:nowrap">0</span></div>
+        <div class="ro"><span class="k">Largest e^(s − m)</span><span class="v ok" style="font-size:52px">1</span></div>
+      </div></div>
+      <div class="card stmt" data-step="1"><span class="k">k</span><div><h3>A shift cancels out</h3><p>e^(s+k) = e^s · e^k. The e^k sits on top and bottom.</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">m</span><div><h3>So shift by −max</h3><p>The biggest term becomes e⁰ = 1. Nothing can overflow.</p></div></div>
+      <div data-step="3"><div class="callout">A different max only changes one common factor. Remember that.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>Softmax ignores a shared shift, so we may pick any reference point.</b><span class="src">FP16 max = 65,504 ≈ e^11.09</span></div>
+</section>
+
+<!-- ============ NEW B · CHANGE OF UNITS (light) ============ -->
+<section class="slide light" data-id="units" data-title="Appendix · Online softmax · change of units" data-notes="Here is the whole trick in one picture. After block one we measured everything against the max 3.1, and the sum was 1.62. Block two brings a bigger score, 4.6. Measured against the new max, every old bar is smaller by the same factor, c equals e to the 3.1 minus 4.6, about 0.22. So we do not need the old scores. Multiply the old sum by c, then add the new block. Like converting savings into a new currency with one exchange rate.">
+  <div class="top r"><span class="eyebrow">Appendix A3 · Change of units</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">A new max is just a change of units.<span class="l2">One factor c converts all the old work.</span></h2>
+  <div class="body" style="grid-template-columns:1.12fr 1fr">
+    <div class="card col r" style="gap:10px"><div class="lab">Bars = e^(s − reference max)</div><canvas id="unitsCv" width="840" height="380" data-interactive></canvas>
+      <div class="ctl"><label for="unT">Reference</label><input type="range" id="unT" min="0" max="100" step="1" value="0"><output id="unTv">3.1</output></div></div>
+    <div class="col" style="gap:16px">
+      <div class="card r"><div class="lab">Analogy · currency</div><p style="margin-top:8px">You saved <b>1.62</b> in “old-max” money. A new max is a new currency: convert <b>once</b> at rate c, keep adding.</p></div>
+      <div class="card stmt" data-step="1"><span class="k">1</span><div><h3>e^(s − m_old) · c = e^(s − m_new)</h3><p>Where c = e^(m_old − m_new).</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">2</span><div><h3>ℓ_new = c · ℓ_old + Σ new</h3><p>Shrink the old sum, add the new terms.</p></div></div>
+      <div data-step="3"><div class="callout">One multiply fixes the whole past.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>When the max rises, every old term shrinks by the same c.</b><span class="src">e^a · e^b = e^(a+b) · toy scores</span></div>
+</section>
+
+<!-- ============ NEW C · OUTPUT GETS THE SAME FIX (dark) ============ -->
+<section class="slide dark" data-id="outfix" data-title="Appendix · Online softmax · fixing the output" data-notes="We do not only need the sum. We need the output: a weighted mix of the value vectors. Those weights are the same e to the s minus m terms that make up l. So when the max rises, the output accumulator O is off by exactly the same factor c. Watch: both shrink together, then the new block is added in gold. And we do not divide by l every time. Keep O unnormalised and divide once at the end. The result matches exact attention, shown as the outlines.">
+  <div class="top r"><span class="eyebrow">Appendix A4 · Fixing the output</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">The output gets the same correction.<span class="l2">Divide by ℓ once, at the very end.</span></h2>
+  <div class="body" style="grid-template-columns:1.12fr 1fr">
+    <div class="card col r" style="gap:10px"><div class="lab">Accumulators for one query row · d = 4</div><canvas id="ofCv" width="840" height="440" data-interactive></canvas>
+      <div class="btnrow"><button class="btn" id="ofNext">Next block ▸</button><button class="btn ghost" id="ofReset">Reset</button></div></div>
+    <div class="col" style="gap:16px">
+      <div class="card stmt" data-step="1"><span class="k">O</span><div><h3>O = Σ e^(s − m) · v</h3><p>Same weights as ℓ, each times its value vector v.</p></div></div>
+      <div class="card stmt" data-step="2"><span class="k">c</span><div><h3>So O needs the same c</h3><p>New max? Multiply ℓ and every entry of O by c.</p></div></div>
+      <div class="card stmt" data-step="3"><span class="k">÷</span><div><h3>Normalise once</h3><p>Keep O unnormalised in SRAM. Output = O ÷ ℓ after the last block.</p></div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>ℓ and O share one correction factor, so they stay in step.</b><span class="src">Dao, 2023 · FlashAttention-2, §3.1</span></div>
+</section>
+
+<!-- ============ NEW D · BY HAND (light) ============ -->
+<section class="slide light" data-id="trace" data-title="Appendix · Online softmax · by hand" data-notes="Now do it by hand on one row of twelve scores, four at a time. Press the arrow for each block. Block one sets the max. Block two raises it, so c is 0.22. Block three raises it again, c is 0.50. After the last block, o divided by l equals the exact answer. In the real kernel every query row in the tile does this at the same time, 128 rows in parallel.">
+  <div class="top r"><span class="eyebrow">Appendix A5 · By hand</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Run it by hand on one row.<span class="l2">Three blocks, three small updates.</span></h2>
+  <div class="body" style="grid-template-rows:auto auto auto;gap:18px;align-content:start">
+    <div class="card r" style="padding:18px 28px"><div style="display:grid;grid-template-columns:repeat(4,1fr);gap:18px" class="math"><span><span class="g">①</span> m ← max(m, block max)</span><span><span class="g">②</span> c = e^(m_old − m)</span><span><span class="g">③</span> ℓ ← c·ℓ + Σ e^(s − m)</span><span><span class="g">④</span> o ← c·o + Σ e^(s − m)·v</span></div></div>
+    <div class="card r" style="padding:10px 18px"><table class="trace" id="traceTbl"></table></div>
+    <div data-step="4"><div class="callout" id="traceCall">o ÷ ℓ equals the exact softmax-weighted average. No approximation.</div></div>
+  </div>
+  <div class="foot r"><b>Each query row keeps its own m, ℓ, o. A tile updates 128 rows at once.</b><span class="src">Same toy row as the live demo</span></div>
+</section>
+
+<!-- ============ ONLINE SOFTMAX · TRY IT (dark) ============ -->
+<section class="slide dark" data-id="online" data-title="Appendix · Online softmax · try it" data-notes="Now try the whole thing. Keep three running numbers per row: the max m, the sum l, and the unnormalised output o. When a new block raises the max, multiply the old sum and the old output by e to the power old max minus new max. Watch the old bars shrink by exactly that factor. After the last block, divide once. The result matches the exact softmax.">
+  <div class="top r"><span class="eyebrow">Appendix A6 · Try it</span><span class="right"><span class="brand">FlashAttention Explained</span><span class="num"></span></span></div>
+  <h2 class="r">Keep a running max and a running sum.<span class="l2">Rescale the past when the max grows.</span></h2>
+  <div class="body" style="grid-template-columns:1.12fr 1fr">
+    <div class="card col r" style="gap:10px"><div class="lab">Weights e^(s − m) · rescaled live</div><canvas id="onCv" width="840" height="440" data-interactive></canvas>
+      <div class="btnrow"><button class="btn" id="onNext">Next block ▸</button><button class="btn ghost" id="onReset">Reset</button><button class="btn ghost" id="onNew">New scores</button></div></div>
+    <div class="col" style="gap:16px">
+      <div class="card r"><div class="ros">
+        <div class="ro"><span class="k">Running m</span><span class="v gold" id="onM">—</span></div>
+        <div class="ro"><span class="k">Running ℓ</span><span class="v pur" id="onL">—</span></div>
+        <div class="ro"><span class="k">Rescale c</span><span class="v" id="onC">—</span></div>
+      </div></div>
+      <div class="card r"><div class="math" id="onMath"></div></div>
+      <div data-step="1"><div class="callout">Exact, not approximate: one division at the end gives the true softmax.</div></div>
+    </div>
+  </div>
+  <div class="foot r"><b>c = e^(m_old − m_new) fixes everything already summed.</b><span class="src">Milakov &amp; Gimelshein, 2018 · Dao et al., 2022</span></div>
+</section>
+
+</div></div>
+
+<nav id="rail" aria-label="Slide navigation"><button id="prev" aria-label="Previous">←</button><div id="dots"></div><button id="next" aria-label="Next">→</button><span id="count"></span></nav>
+<button class="pill" id="hidebtn" type="button">Slides (H)</button>
+<button class="pill" id="fsbtn" type="button">Full screen (F)</button>
+<div id="panel" role="dialog" aria-label="Show or hide slides"><h4>Show / hide slides</h4><div id="panelList"></div></div>
+<div id="notes" aria-live="polite"><h4>Speaker notes (N)</h4><div id="notesBody"></div></div>
+
+<script>
+/* ================= HELPERS (reuse as-is) ================= */
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const NS='http://www.w3.org/2000/svg',DEG=Math.PI/180,TAU=Math.PI*2;
+const RM=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const C={p:'#4E0973',deep:'#3E055C',deeper:'#2E0447',mid:'#6B2A9E',mid2:'#7A53A2',lil:'#C4B0E8',lil2:'#AD9CD5',ink:'#241733',mut:'#5E5670',mut2:'#736B80',hair:'#D6CCE8',gold:'#8E6420',goldD:'#DCA972',red:'#CC4B4B',red2:'#B23A3A',mint:'#9CE8C0',ok:'#2f8a5c'};
+const MONO='"JetBrains Mono", ui-monospace, monospace', ARCH='Archivo, system-ui, sans-serif';
+function S(tag,a,p){const e=document.createElementNS(NS,tag);if(a)for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
+function T(p,x,y,s,a){const t=S('text',Object.assign({x,y},a||{}),p);t.textContent=s;return t}
+function attr(e,o){for(const k in o)e.setAttribute(k,o[k])}
+function pt(r,a){return[r*Math.cos(a),-r*Math.sin(a)]}
+function arcD(r,a0,a1){let s=Math.min(a0,a1),e=Math.max(a0,a1);if(e-s<1e-4)return'';if(e-s>TAU-1e-3)e=s+TAU-1e-3;const[x0,y0]=pt(r,s),[x1,y1]=pt(r,e);return`M${x0} ${y0} A${r} ${r} 0 ${(e-s)>Math.PI?1:0} 0 ${x1} ${y1}`}
+function Arrow(p,o){const head=o.head||26,g=S('g',{},p),l=S('line',{stroke:o.color,'stroke-width':o.w||8,'stroke-linecap':'round'},g),h=S('polygon',{fill:o.color},g);
+  return{g,set(x0,y0,x1,y1){const dx=x1-x0,dy=y1-y0,L=Math.hypot(dx,dy);if(L<1){g.style.display='none';return}g.style.display='';const hd=Math.min(head,L*.6),ux=dx/L,uy=dy/L,bx=x1-ux*hd,by=y1-uy*hd;attr(l,{x1:x0,y1:y0,x2:bx+ux*2,y2:by+uy*2});const px=-uy*hd*.55,py=ux*hd*.55;h.setAttribute('points',`${x1},${y1} ${bx+px},${by+py} ${bx-px},${by-py}`)}}}
+function setP(r){r.style.setProperty('--p',(r.value-r.min)/(r.max-r.min)*100+'%')}
+document.addEventListener('input',e=>{if(e.target.type==='range')setP(e.target)});
+function rng(id,fn){const r=$('#'+id);setP(r);r.addEventListener('input',()=>fn(+r.value));return{el:r,set(v){r.value=v;setP(r)}}}
+function cv(id){const c=$('#'+id);const w=+c.getAttribute('width'),h=+c.getAttribute('height');c.width=w*2;c.height=h*2;c.style.width=w+'px';c.style.height=h+'px';const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);return{c,x,w,h}}
+const fmtInt=v=>Math.round(v).toLocaleString('en-US');
+const ease=x=>{x=Math.max(0,Math.min(1,x));return x<.5?2*x*x:1-Math.pow(-2*x+2,2)/2};
+/* H[data-id] = {enter(), leave(), tick(tSeconds, dt), onStep(n)}  · renders[] = redraw on font load / print */
+const H={},renders=[];
+
+
+/* ================= SLIDE SCRIPTS · FlashAttention ================= */
+const fmtGB=gb=>gb>=1000?(gb/1000).toFixed(gb>=10000?0:1)+' TB':gb>=1?(gb>=100?Math.round(gb):gb.toFixed(1))+' GB':(gb*1000>=100?Math.round(gb*1000):(gb*1000).toFixed(1))+' MB';
+const fmtN=n=>n>=1024?(n/1024)+'K':String(n);
+function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
+function lerp(a,b,t){return a+(b-a)*t}
+function hatch(x,color){const p=document.createElement('canvas');p.width=p.height=12;const g=p.getContext('2d');g.strokeStyle=color;g.lineWidth=3;g.beginPath();g.moveTo(-2,14);g.lineTo(14,-2);g.moveTo(-2,2);g.lineTo(2,-2);g.moveTo(10,14);g.lineTo(14,10);g.stroke();return x.createPattern(p,'repeat')}
+function rrect(x,X,Y,W,H,r){x.beginPath();x.moveTo(X+r,Y);x.arcTo(X+W,Y,X+W,Y+H,r);x.arcTo(X+W,Y+H,X,Y+H,r);x.arcTo(X,Y+H,X,Y,r);x.arcTo(X,Y,X+W,Y,r);x.closePath()}
+/* auto-play helper: runs until the user touches a control on that slide */
+function autoCtl(){return{user:false,hold:0,touch(){this.user=true}}}
+
+/* ---------- tile-scan miniature (title + summary): a gold tile sweeps the score grid; nothing is stored ---------- */
+function makeScan(svg){
+  const n=8,c=48,g=6,x0=150,y0=150,span=n*c+(n-1)*g;
+  const cell=(i,j)=>[x0+j*(c+g),y0+i*(c+g)];
+  T(svg,110,118,'Kᵀ',{class:'t30b','text-anchor':'middle',fill:'#C4B0E8'});
+  const qs=[],ks=[],os=[],ofill=[],cells=[];
+  for(let k=0;k<n;k++){
+    qs.push(S('rect',{x:86,y:y0+k*(c+g),width:c,height:c,rx:8,fill:'rgba(196,176,232,.16)',stroke:'rgba(196,176,232,.45)','stroke-width':2},svg));
+    ks.push(S('rect',{x:x0+k*(c+g),y:86,width:c,height:c,rx:8,fill:'rgba(196,176,232,.16)',stroke:'rgba(196,176,232,.45)','stroke-width':2},svg));
+    os.push(S('rect',{x:x0+span+24,y:y0+k*(c+g),width:c,height:c,rx:8,fill:'none',stroke:'rgba(156,232,192,.5)','stroke-width':2},svg));
+    ofill.push(S('rect',{x:x0+span+24,y:y0+k*(c+g)+c,width:c,height:0,rx:6,fill:'rgba(156,232,192,.75)'},svg));
+  }
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++){const[x,y]=cell(i,j);cells.push({r:S('rect',{x,y,width:c,height:c,rx:6,fill:'#C4B0E8',opacity:.06},svg),lit:-9})}
+  S('rect',{x:x0-8,y:y0-8,width:span+16,height:span+16,rx:12,fill:'none',stroke:'rgba(220,169,114,.55)','stroke-width':2,'stroke-dasharray':'8 9'},svg);
+  T(svg,110,y0+span+44,'Q',{class:'t30b','text-anchor':'middle',fill:'#C4B0E8'});
+  T(svg,x0+span+48,y0+span+44,'O',{class:'t30b','text-anchor':'middle',fill:'#9CE8C0'});
+  T(svg,x0+span/2,y0+span+44,'N × N · never stored',{class:'t24','text-anchor':'middle',fill:'#DCA972'});
+  const cur=S('rect',{width:c,height:c,rx:6,fill:'#DCA972'},svg);
+  let tt=0,last=-1;
+  function draw(){const k=Math.floor(tt*3.2)%(n*n),i=Math.floor(k/n),j=k%n;
+    if(k!==last){if(k===0)ofill.forEach(r=>attr(r,{height:0,y:+r.getAttribute('y')+ +r.getAttribute('height')}));cells[i*n+j].lit=tt;last=k}
+    cells.forEach((o,idx)=>{const a=Math.max(.06,.55-(tt-o.lit)*.9);o.r.setAttribute('opacity',a.toFixed(3))});
+    const[x,y]=cell(i,j);attr(cur,{x,y});
+    qs.forEach((r,q)=>attr(r,{stroke:q===i?'#DCA972':'rgba(196,176,232,.45)','stroke-width':q===i?4:2}));
+    ks.forEach((r,q)=>attr(r,{stroke:q===j?'#DCA972':'rgba(196,176,232,.45)','stroke-width':q===j?4:2}));
+    ofill.forEach((r,q)=>{const h=q<i?c:q===i?c*(j+1)/n:0;attr(r,{y:y0+q*(c+g)+c-h,height:h})})}
+  if(RM){tt=(n*3+5)/3.2}draw();
+  return{tick(dt){if(!RM){tt+=dt;draw()}}}
+}
+(()=>{const s=makeScan($('#heroSvg'));H.title={tick(t,dt){s.tick(dt)}}})();
+(()=>{const s=makeScan($('#sumSvg'));H.sum={tick(t,dt){s.tick(dt)}}})();
+
+/* ---------- 2 · attention heatmap ---------- */
+(()=>{const ch=cv('recapCv'),x=ch.x;const tok=['The','cat','sat','on','the','mat','because','it','was','tired'],n=tok.length;
+  const Sm=[];for(let i=0;i<n;i++){Sm.push([]);for(let j=0;j<n;j++){Sm[i].push(((i*7+j*13)%10)/10*.6+(i===j?1.2:0))}}
+  const bump=(a,b,v)=>{Sm[tok.indexOf(a)][b]+=v};
+  bump('cat',0,1.4);bump('cat',2,1.8);bump('sat',1,2.4);bump('sat',5,1.4);bump('on',5,1.6);bump('mat',3,1.9);bump('mat',4,1.2);
+  bump('because',2,1.2);bump('because',9,1.0);Sm[7][1]+=3.0;Sm[7][9]+=1.2;Sm[8][7]+=1.8;Sm[8][9]+=1.4;Sm[9][1]+=2.0;Sm[9][7]+=1.6;bump('The',1,1.3);bump('the',5,1.8);
+  const P=Sm.map(r=>{const m=Math.max(...r),e=r.map(v=>Math.exp(v-m)),s=e.reduce((a,b)=>a+b,0);return e.map(v=>v/s)});
+  let sel=7,ac=autoCtl(),tAcc=0;const L=116,Tp=118,cw=56,chh=44;
+  function draw(){x.clearRect(0,0,ch.w,ch.h);x.font=`500 24px ${MONO}`;
+    for(let j=0;j<n;j++){x.save();x.translate(L+j*cw+cw/2+6,Tp-12);x.rotate(-Math.PI/4);x.textAlign='left';x.textBaseline='middle';x.fillStyle=C.mut;x.fillText(tok[j],0,0);x.restore()}
+    for(let i=0;i<n;i++){x.textAlign='right';x.textBaseline='middle';x.fillStyle=i===sel?C.p:C.mut;x.font=`${i===sel?700:500} 24px ${MONO}`;x.fillText(tok[i],L-14,Tp+i*chh+chh/2);
+      const rm=Math.max(...P[i]);for(let j=0;j<n;j++){const v=Math.pow(P[i][j]/rm,.8),a=i===sel?1:.55;
+        const r=Math.round(lerp(247,78,v)),g=Math.round(lerp(244,9,v)),b=Math.round(lerp(251,115,v));x.globalAlpha=a;x.fillStyle=`rgb(${r},${g},${b})`;x.fillRect(L+j*cw+1,Tp+i*chh+1,cw-2,chh-2);x.globalAlpha=1}}
+    x.strokeStyle=C.gold;x.lineWidth=4;x.strokeRect(L-2,Tp+sel*chh-1,n*cw+4,chh+2);
+    const best=P[sel].indexOf(Math.max(...P[sel].filter((v,j)=>j!==sel)));x.strokeStyle='#fff';x.lineWidth=3;x.strokeRect(L+best*cw+4,Tp+sel*chh+4,cw-8,chh-8)}
+  ch.c.addEventListener('click',e=>{const r=ch.c.getBoundingClientRect(),yy=(e.clientY-r.top)/r.height*ch.h;const i=Math.floor((yy-Tp)/chh);if(i>=0&&i<n){sel=i;ac.touch();draw()}});
+  renders.push(draw);draw();
+  H.recap={enter(){ac=autoCtl();sel=7;tAcc=0;draw()},tick(t,dt){if(RM||ac.user)return;tAcc+=dt;if(tAcc>1.8){tAcc=0;sel=(sel+1)%n;draw()}}};})();
+
+/* ---------- 3 · quadratic memory ---------- */
+(()=>{const ch=cv('quadCv'),x=ch.x;let N=8192,h=32;const d=128;
+  const sp=N=>2*2*N*N*h/1e9,qk=N=>4*2*N*d*h/1e9;
+  rng('qN',v=>{N=Math.pow(2,v);draw()});rng('qH',v=>{h=v;draw()});
+  function draw(){const L=112,R=ch.w-34,Tp=18,B=ch.h-54,X=n=>L+(Math.log2(n)-9)/8*(R-L),Y=gb=>B-(Math.log10(gb)+3)/7*(B-Tp);
+    x.clearRect(0,0,ch.w,ch.h);x.font=`500 24px ${MONO}`;x.textBaseline='middle';
+    [[-3,'1 MB'],[0,'1 GB'],[3,'1 TB']].forEach(([e,l])=>{x.strokeStyle='rgba(196,176,232,.18)';x.lineWidth=1.5;x.beginPath();x.moveTo(L,Y(Math.pow(10,e)));x.lineTo(R,Y(Math.pow(10,e)));x.stroke();x.fillStyle='rgba(196,176,232,.85)';x.textAlign='right';x.fillText(l,L-12,Y(Math.pow(10,e)))});
+    x.textAlign='center';[512,2048,8192,32768,131072].forEach(n=>{x.fillStyle='rgba(196,176,232,.85)';x.fillText(fmtN(n),X(n),B+30)});
+    x.setLineDash([10,8]);x.strokeStyle=C.red;x.lineWidth=2.5;x.beginPath();x.moveTo(L,Y(80));x.lineTo(R,Y(80));x.stroke();x.setLineDash([]);x.fillStyle='#FF9A9A';x.textAlign='left';x.fillText('80 GB GPU',L+10,Y(80)-20);
+    const line=(f,col,w)=>{x.strokeStyle=col;x.lineWidth=w;x.beginPath();for(let s=0;s<=160;s++){const n=Math.pow(2,9+s/160*8);s?x.lineTo(X(n),Y(f(n))):x.moveTo(X(n),Y(f(n)))}x.stroke()};
+    line(sp,'#FF8A8A',5);line(qk,C.lil,5);
+    x.textAlign='right';x.fillStyle='#FF9A9A';x.font=`700 24px ${MONO}`;x.fillText('S + P  ∝ N²',R-6,Y(sp(131072))+28);x.fillStyle=C.lil;x.fillText('Q K V O  ∝ N',R-6,Y(qk(131072))-26);
+    x.setLineDash([6,8]);x.strokeStyle=C.goldD;x.lineWidth=2;x.beginPath();x.moveTo(X(N),Tp);x.lineTo(X(N),B);x.stroke();x.setLineDash([]);
+    [[sp(N),'#FF8A8A'],[qk(N),C.lil]].forEach(([v,c])=>{x.fillStyle=C.goldD;x.beginPath();x.arc(X(N),Y(v),11,0,TAU);x.fill();x.strokeStyle=c;x.lineWidth=3;x.stroke()});
+    const a=sp(N),b=qk(N);$('#qNv').textContent=fmtInt(N);$('#qHv').textContent=h;$('#qS').textContent=fmtGB(a);$('#qQ').textContent=fmtGB(b);$('#qR').textContent=Math.round(a/b)+'×';
+    const t=`At <b>${fmtInt(N)} tokens</b> and ${h} heads, one layer's S and P need <b>${fmtGB(a)}</b>. `+(a<80?'That still fits in an 80 GB GPU.':'That is more than an 80 GB GPU holds.');if($('#qTxt').innerHTML!==t)$('#qTxt').innerHTML=t}
+  renders.push(draw);draw();H.quad={};})();
+
+/* ---------- 4 · memory pyramid with flowing dots (speed ∝ bandwidth) ---------- */
+(()=>{const svg=$('#pyrSvg');const tiers=[['Registers','per thread',C.p,'#fff',300],['SRAM','192 KB per SM',C.mid,'#fff',220],['L2 cache','40 MB',C.mid2,'#fff',150],['HBM','40–80 GB',C.lil2,C.deeper,80],['CPU DRAM','>1 TB',C.hair,C.ink,14]];
+  const cx=410,top=26,th=96,gp=12,w=y=>150+(y-top)/(5*th+4*gp)*560;
+  const ar=S('g',{},svg);S('line',{x1:42,y1:40,x2:42,y2:540,stroke:C.mut2,'stroke-width':3},ar);S('polygon',{points:'42,26 32,46 52,46',fill:C.gold},ar);S('polygon',{points:'42,556 32,536 52,536',fill:C.mut2},ar);
+  const tf=S('text',{x:0,y:0,class:'t24',fill:C.gold,transform:'translate(26,150) rotate(-90)','text-anchor':'middle'},ar);tf.textContent='faster';
+  const tb=S('text',{x:0,y:0,class:'t24',fill:C.mut2,transform:'translate(26,430) rotate(-90)','text-anchor':'middle'},ar);tb.textContent='bigger';
+  const dots=[];const G=tiers.map((t,k)=>{const y1=top+k*(th+gp),y2=y1+th,w1=w(y1),w2=w(y2);const g=S('g',{class:'tr'},svg);
+    S('path',{d:`M${cx-w1/2} ${y1} L${cx+w1/2} ${y1} L${cx+w2/2} ${y2} L${cx-w2/2} ${y2} Z`,fill:t[2],stroke:'rgba(78,9,115,.25)','stroke-width':2,'stroke-linejoin':'round'},g);
+    T(g,cx,y1+42,t[0],{class:'t30b','text-anchor':'middle',fill:t[3]});T(g,cx,y1+76,t[1],{class:'t24','text-anchor':'middle',fill:t[3],opacity:.85});
+    const ds=[0,1,2].map(q=>S('circle',{r:6,fill:k<3?C.goldD:C.gold,opacity:.9},g));dots.push({ds,y:y1+th-12,wl:Math.min(w1,w2)-40,sp:t[4],k});return g});
+  let tt=0;function draw(){dots.forEach(o=>o.ds.forEach((d,q)=>{const f=((tt*o.sp/o.wl)+q/3)%1;attr(d,{cx:cx-o.wl/2+f*o.wl,cy:o.y})}))}
+  draw();H.hier={tick(t,dt){if(!RM){tt+=dt;draw()}},onStep(s){svg.classList.toggle('f',s>0);G.forEach((g,k)=>g.classList.toggle('hl',k===s-1));$$('.tier',svg.closest('.slide')).forEach((e,k)=>e.classList.toggle('hl',k===s-1))}};})();
+
+/* ---------- 5 · inside the chip: load / compute / store ---------- */
+(()=>{const svg=$('#chipSvg');
+  const hb=[];[[30,60],[30,165],[30,270],[1470,60],[1470,165],[1470,270]].forEach(([x,y])=>{const g=S('g',{},svg);S('rect',{x,y,width:200,height:90,rx:12,fill:'rgba(196,176,232,.14)',stroke:'rgba(196,176,232,.55)','stroke-width':2},g);
+    for(let k=1;k<4;k++)S('line',{x1:x+12,x2:x+188,y1:y+k*22.5,y2:y+k*22.5,stroke:'rgba(196,176,232,.3)','stroke-width':2},g);hb.push([x,y])});
+  T(svg,130,40,'HBM',{class:'t26b','text-anchor':'middle',fill:'#fff'});T(svg,1570,40,'HBM',{class:'t26b','text-anchor':'middle',fill:'#fff'});
+  T(svg,130,400,'1.5–2.0 TB/s',{class:'t24','text-anchor':'middle',fill:'#DCA972'});T(svg,1570,400,'1.5–2.0 TB/s',{class:'t24','text-anchor':'middle',fill:'#DCA972'});
+  S('rect',{x:300,y:12,width:1100,height:396,rx:24,fill:'rgba(255,255,255,.03)',stroke:'rgba(196,176,232,.5)','stroke-width':2.5},svg);
+  T(svg,322,48,'GPU die',{class:'t24',fill:'rgba(196,176,232,.9)'});T(svg,1380,48,'× 108 SMs on an A100',{class:'t24','text-anchor':'end',fill:'rgba(196,176,232,.9)'});
+  const phase=T(svg,850,48,'',{class:'t26b','text-anchor':'middle',fill:'#DCA972'});
+  S('rect',{x:340,y:206,width:1020,height:46,rx:10,fill:'rgba(196,176,232,.12)',stroke:'rgba(196,176,232,.4)','stroke-width':2},svg);
+  
+  const paths=S('g',{},svg),sms=[];
+  for(let r=0;r<2;r++)for(let c=0;c<5;c++){const x=345+c*205,y=r?266:74;const g=S('g',{class:'sm'},svg);
+    S('rect',{class:'box',x,y,width:190,height:122,rx:14,fill:'rgba(255,255,255,.06)',stroke:'rgba(196,176,232,.5)','stroke-width':2},g);
+    T(g,x+16,y+34,'SM',{class:'t26b',fill:'#fff'});T(g,x+174,y+34,'regs',{class:'t24','text-anchor':'end',fill:'rgba(196,176,232,.75)'});
+    S('rect',{x:x+14,y:y+50,width:104,height:58,rx:8,fill:'rgba(156,232,192,.16)',stroke:'rgba(156,232,192,.6)','stroke-width':2},g);T(g,x+66,y+87,'SRAM',{class:'t24','text-anchor':'middle',fill:'#9CE8C0'});
+    const tc=S('rect',{class:'tc',x:x+128,y:y+50,width:48,height:58,rx:8,fill:'rgba(196,176,232,.2)',stroke:'rgba(196,176,232,.6)','stroke-width':2},g);T(g,x+152,y+87,'TC',{class:'t24','text-anchor':'middle',fill:'#fff'});
+    const left=c<3,src=hb[(left?0:3)+(r?2:0)-(r&&c===2?1:0)],sx=left?src[0]+200:src[0],sy=src[1]+45,tx=x+66,ty=r?y:y+122;
+    const ex=left?300:1400,ly=229+(r?6:-6),dir=left?1:-1;const p=S('path',{d:`M${sx} ${sy} C${sx+dir*40} ${sy}, ${ex-dir*40} ${ly}, ${ex} ${ly} L${tx-dir*24} ${ly} Q${tx} ${ly} ${tx} ${ly+(r?24:-24)} L${tx} ${ty}`,fill:'none',stroke:'rgba(196,176,232,.22)','stroke-width':3},paths);
+    sms.push({g,tc,p,L:0,dots:[0,1,2].map(()=>S('rect',{width:16,height:16,rx:3,fill:'#C4B0E8'},svg))})}
+  S('rect',{x:700,y:211,width:300,height:36,rx:18,fill:'#43106A',stroke:'rgba(196,176,232,.5)','stroke-width':2},svg);T(svg,850,237,'L2 cache · 40 MB',{class:'t24','text-anchor':'middle',fill:'#fff'});
+  sms.forEach(o=>o.L=o.p.getTotalLength());let tt=0,step=0;
+  function draw(){const ph=step?step-1:Math.floor(tt/2.2)%3,f=step?(tt%2.2)/2.2:(tt%2.2)/2.2;phase.textContent=['① LOAD  HBM → SRAM','② COMPUTE  on chip','③ STORE  SRAM → HBM'][ph];
+    sms.forEach((o,i)=>{o.p.setAttribute('stroke',ph===1?'rgba(196,176,232,.12)':ph===0?'rgba(196,176,232,.4)':'rgba(220,169,114,.45)');
+      o.dots.forEach((d,k)=>{if(ph===1){d.style.display='none';return}d.style.display='';let q=RM?.5:(f*1.2+k*.18+i*.03)%1;if(ph===2)q=1-q;const P=o.p.getPointAtLength(q*o.L);attr(d,{x:P.x-8,y:P.y-8,fill:ph===2?'#DCA972':'#C4B0E8'})});
+      o.tc.setAttribute('fill',ph===1&&(Math.sin(tt*14+i)>-.2)?'rgba(220,169,114,.85)':'rgba(196,176,232,.2)')})}
+  draw();H.chip={enter(){tt=0},tick(t,dt){if(!RM)tt+=dt;draw()},onStep(s){step=s;tt=0;draw()}};})();
+
+/* ---------- 6 · roofline ---------- */
+(()=>{const ch=cv('roofCv'),x=ch.x;const PK=312,BW=1.555,ridge=PK/BW;
+  const ops=[['Mask',.25],['Dropout',.5],['Softmax',1.25],['QKᵀ · N 4K',(2*4096*4096*64)/(2*(2*4096*64+4096*4096))],['Big matmul',8192/3]];
+  let sel=2,ac=autoCtl(),tAcc=0;const box=$('#roofBtns');
+  const btns=ops.map((o,i)=>{const b=document.createElement('button');b.className='btn ghost sm';b.textContent=o[0];b.addEventListener('click',()=>{sel=i;ac.touch();draw()});box.appendChild(b);return b});
+  const att=I=>Math.min(PK,BW*I);
+  function draw(){const L=100,R=ch.w-30,Tp=20,B=ch.h-60,X=I=>L+(Math.log10(I)+1)/5*(R-L),Y=t=>B-(Math.log10(t)+1)/4*(B-Tp);
+    x.clearRect(0,0,ch.w,ch.h);x.fillStyle='rgba(204,75,75,.06)';x.fillRect(L,Tp,X(ridge)-L,B-Tp);x.fillStyle='rgba(47,138,92,.06)';x.fillRect(X(ridge),Tp,R-X(ridge),B-Tp);
+    x.font=`500 24px ${MONO}`;x.textBaseline='middle';
+    [-1,0,1,2,3].forEach(e=>{x.strokeStyle='#E6DDF2';x.lineWidth=1.5;x.beginPath();x.moveTo(L,Y(Math.pow(10,e)));x.lineTo(R,Y(Math.pow(10,e)));x.stroke();x.fillStyle=C.mut;x.textAlign='right';x.fillText(e<0?'0.1':fmtInt(Math.pow(10,e)),L-12,Y(Math.pow(10,e)))});
+    x.textAlign='center';[-1,0,1,2,3,4].forEach(e=>{x.fillStyle=C.mut;x.fillText(e<0?'0.1':e<3?fmtInt(Math.pow(10,e)):Math.pow(10,e-3)+'K',X(Math.pow(10,e)),B+26)});
+    x.fillText('FLOPs per byte moved →',(L+R)/2,B+52);x.textAlign='left';x.fillText('TF/s',L+8,Tp+16);
+    x.fillStyle=C.red2;x.fillText('memory-bound',L+14,Y(250));x.fillStyle=C.ok;x.textAlign='right';x.fillText('compute-bound',R-10,Y(60));
+    x.strokeStyle=C.p;x.lineWidth=5;x.beginPath();x.moveTo(X(.1),Y(att(.1)));x.lineTo(X(ridge),Y(PK));x.lineTo(R,Y(PK));x.stroke();
+    x.setLineDash([6,8]);x.strokeStyle=C.gold;x.lineWidth=2;x.beginPath();x.moveTo(X(ridge),Tp);x.lineTo(X(ridge),B);x.stroke();x.setLineDash([]);
+    x.fillStyle=C.gold;x.textAlign='left';x.fillText('ridge ≈ 200',X(ridge)+10,Y(2));
+    ops.forEach((o,i)=>{if(i===sel)return;x.fillStyle=C.mid2;x.beginPath();x.arc(X(o[1]),Y(att(o[1])),9,0,TAU);x.fill()});
+    const o=ops[sel],px=X(o[1]),py=Y(att(o[1]));x.setLineDash([6,8]);x.strokeStyle=C.gold;x.lineWidth=2;x.beginPath();x.moveTo(px,B);x.lineTo(px,py);x.stroke();x.setLineDash([]);
+    x.fillStyle=C.gold;x.beginPath();x.arc(px,py,13,0,TAU);x.fill();x.strokeStyle='#fff';x.lineWidth=3;x.stroke();
+    x.font=`700 24px ${MONO}`;x.fillStyle=C.ink;x.textAlign=px>R-260?'right':'left';x.fillText(o[0],px+(px>R-260?-22:22),py+(py<Tp+60?34:-30));
+    btns.forEach((b,i)=>b.classList.toggle('on',i===sel));
+    const a=att(o[1]),pc=a/PK*100;$('#rfI').textContent=o[1]<10?o[1].toFixed(2).replace(/0$/,''):fmtInt(o[1]);$('#rfT').textContent=a<10?a.toFixed(1):fmtInt(a);
+    const pe=$('#rfP');pe.textContent=(pc<1?pc.toFixed(1):Math.round(pc))+'%';pe.className='v '+(pc>=90?'ok':'bad');
+    const v=$('#rfV');const mb=o[1]<ridge;v.textContent=mb?'memory-bound':'compute-bound';v.className='verdict '+(mb?'bad':'ok')}
+  renders.push(draw);draw();
+  H.roof={enter(){ac=autoCtl();sel=2;tAcc=0;draw()},tick(t,dt){if(RM||ac.user)return;tAcc+=dt;if(tAcc>2.2){tAcc=0;sel=(sel+1)%ops.length;draw()}}};})();
+
+/* ---------- 7 · standard attention: 5 kernels, 8 N² trips through HBM ---------- */
+(()=>{const svg=$('#stdSvg');
+  S('rect',{x:16,y:12,width:1668,height:148,rx:18,fill:'rgba(255,255,255,.05)',stroke:'rgba(196,176,232,.45)','stroke-width':2},svg);
+  T(svg,36,46,'HBM',{class:'t26b',fill:'#fff'});T(svg,36,78,'slow',{class:'t24',fill:'rgba(196,176,232,.8)'});
+  const slots={Q:[150,0],K:[240,0],S:[440,1],Sm:[640,1],P:[840,1],Pd:[1040,1],V:[1240,0],O:[1440,0]},lab={Q:'Q',K:'K',S:'S',Sm:'S′',P:'P',Pd:'P′',V:'V',O:'O'};
+  const tens={};for(const k in slots){const[cx,big]=slots[k];const g=S('g',{},svg);
+    if(big){S('rect',{x:cx-50,y:42,width:100,height:100,rx:10,fill:'rgba(204,75,75,.38)',stroke:'#FF9A9A','stroke-width':2.5},g);T(g,cx,103,lab[k],{class:'t30b','text-anchor':'middle',fill:'#fff'});T(g,cx+46,62,'N²',{class:'t24','text-anchor':'end',fill:'#FFD0D0'})}
+    else{S('rect',{x:cx-22,y:52,width:44,height:86,rx:8,fill:'rgba(196,176,232,.3)',stroke:'#C4B0E8','stroke-width':2},g);T(g,cx,104,lab[k],{class:'t26b','text-anchor':'middle',fill:'#fff'})}
+    tens[k]=g}
+  const kern=[['QKᵀ',290,['Q','K'],'S'],['Mask',540,['S'],'Sm'],['Softmax',740,['Sm'],'P'],['Dropout',940,['P'],'Pd'],['PV',1240,['Pd','V'],'O']];
+  const KN=kern.map(([n,cx])=>{const g=S('g',{class:'kn'},svg);S('rect',{x:cx-85,y:270,width:170,height:84,rx:16},g);T(g,cx,322,n,{class:'t30b','text-anchor':'middle',fill:'#fff'});return g});
+  T(svg,40,398,'On chip · one kernel at a time',{class:'t24',fill:'rgba(196,176,232,.85)'});
+  const cnt=T(svg,1680,398,'',{class:'t26b','text-anchor':'end',fill:'#DCA972'});
+  const pg=S('g',{},svg);const mk=(x1,y1,x2,y2)=>{const p=S('path',{d:`M${x1} ${y1} C${x1} ${(y1+y2)/2}, ${x2} ${(y1+y2)/2}, ${x2} ${y2}`,fill:'none',stroke:'rgba(196,176,232,.25)','stroke-width':3,'stroke-dasharray':'6 8'},pg);return{p,L:p.getTotalLength()}};
+  kern.forEach(k=>{k.rd=k[2].map(s=>({s,...mk(slots[s][0],slots[s][1]?142:138,k[1]-30+(k[2].length>1?(k[2].indexOf(s)*60):30),270)}));k.wr=mk(k[1],270,slots[k[3]][0],slots[k[3]][1]?142:138)});
+  const mov=[0,1].map(()=>S('rect',{width:30,height:30,rx:6},svg));
+  const per=2.6,cyc=per*5+1.6;let tt=0,step=0;const isBig=s=>slots[s][1]===1;
+  function draw(){const tc=RM?cyc-.1:tt%cyc,k=Math.min(4,Math.floor(tc/per)),f=(tc-k*per)/per,done=tc>=per*5;
+    for(const s in tens){let vis=['Q','K','V'].includes(s);kern.forEach((kk,i)=>{if(kk[3]===s&&(i<k||(i===k&&f>.92)||done))vis=true});tens[s].style.opacity=vis?1:.08}
+    let trips=0;kern.forEach((kk,i)=>{const n=kk[2].filter(isBig).length+(isBig(kk[3])?1:0),nr=kk[2].filter(isBig).length;if(done||i<k)trips+=n;else if(i===k){if(f>.38)trips+=nr;if(f>.92&&isBig(kk[3]))trips+=1}});
+    cnt.textContent=`N² trips: ${trips} / 8   ·   ≈ ${(trips*1.07).toFixed(1)} GB at 4K tokens, 32 heads`;
+    KN.forEach((g,i)=>{g.classList.toggle('hl',!done&&i===k&&f>.35&&f<.6);g.classList.toggle('dim',!!step&&!({1:[0],2:[1,2,3],3:[4]}[step].includes(i)))});
+    mov.forEach(m=>m.style.display='none');if(done)return;const kk=kern[k];
+    if(f<.38){kk.rd.forEach((r,j)=>{const P=r.p.getPointAtLength(ease(f/.38)*r.L),m=mov[j];m.style.display='';attr(m,{x:P.x-15,y:P.y-15,fill:isBig(r.s)?'#FF8A8A':'#C4B0E8'})})}
+    else if(f>.6){const q=ease((f-.6)/.32),P=kk.wr.p.getPointAtLength(Math.min(1,q)*kk.wr.L),m=mov[0];if(q<1){m.style.display='';attr(m,{x:P.x-15,y:P.y-15,fill:isBig(kk[3])?'#FF8A8A':'#9CE8C0'})}}}
+  draw();H.std={enter(){tt=0},tick(t,dt){if(!RM)tt+=dt;draw()},onStep(s){step=s;draw()}};})();
+
+/* ---------- 8 · modelled timeline: compute vs waiting ---------- */
+(()=>{const ch=cv('tlCv'),x=ch.x;const N=1024,d=64,bh=64*16,PK=312e12,BW=1.555e12,b2=2;
+  const big=N*N*bh*b2,small=N*d*bh*b2;
+  const K=[['QKᵀ',2*N*N*d*bh,2*small+big],['Mask',N*N*bh,2*big],['Softmax',5*N*N*bh,2*big],['Dropout',2*N*N*bh,2*big],['PV',2*N*N*d*bh,big+2*small]].map(([n,f,b])=>{const tc=f/PK*1e3,tm=b/BW*1e3;return{n,tc,t:Math.max(tc,tm)}});
+  const tot={n:'Total',tc:K.reduce((a,k)=>a+k.tc,0),t:K.reduce((a,k)=>a+k.t,0)};const rows=[...K,tot];let anim=1,pat=null;
+  function draw(){if(!pat)pat=hatch(x,'rgba(204,75,75,.55)');x.clearRect(0,0,ch.w,ch.h);const L=150,R=640,rh=56,Tp=14,mx=tot.t;x.font=`500 24px ${MONO}`;x.textBaseline='middle';
+    rows.forEach((r,i)=>{const y=Tp+i*(rh+10)+(i===5?16:0),w=(R-L)*(i===5?1:r.t/mx*2.6)*ease(anim),wc=w*r.tc/r.t;
+      if(i===5){x.strokeStyle=C.hair;x.lineWidth=2;x.beginPath();x.moveTo(0,y-14);x.lineTo(ch.w,y-14);x.stroke()}
+      x.fillStyle=i===5?C.ink:C.mut;x.font=`${i===5?700:500} 24px ${MONO}`;x.textAlign='right';x.fillText(r.n,L-16,y+rh/2);
+      x.fillStyle='rgba(204,75,75,.10)';x.fillRect(L,y,w,rh);x.fillStyle=pat;x.fillRect(L,y,w,rh);x.fillStyle=C.p;x.fillRect(L,y,Math.max(wc,w>0?3:0),rh);
+      x.textAlign='left';x.fillStyle=C.ink;x.font=`600 24px ${MONO}`;x.fillText(r.t.toFixed(2)+' ms',L+w+12,y+rh/2)});
+    const y=Tp+6*(rh+10)+30;x.font=`700 26px ${ARCH}`;x.fillStyle=C.p;x.textAlign='left';x.fillText(`Tensor cores busy ≈ ${Math.round(tot.tc/tot.t*100)}% of the time`,0,y)}
+  renders.push(draw);draw();
+  H.issues={enter(){anim=RM?1:0},tick(t,dt){if(anim<1){anim=Math.min(1,anim+dt/1.3);draw()}}};})();
+
+/* ---------- 9 · tiling animation: HBM ↔ SRAM, score tiles never stored ---------- */
+(()=>{const svg=$('#tileSvg');const n=4,bw=84,bhh=72,cols={Q:110,K:230,V:350,O:470},by=b=>90+b*86;
+  S('rect',{x:10,y:10,width:556,height:422,rx:16,fill:'rgba(255,255,255,.04)',stroke:'rgba(196,176,232,.35)','stroke-width':2},svg);
+  T(svg,30,46,'HBM · big, slow',{class:'t24',fill:'rgba(196,176,232,.9)'});
+  const blk={};for(const c in cols){T(svg,cols[c],78,c,{class:'t26b','text-anchor':'middle',fill:c==='O'?'#9CE8C0':'#fff'});blk[c]=[];
+    for(let b=0;b<n;b++)blk[c].push(S('rect',{x:cols[c]-bw/2,y:by(b),width:bw,height:bhh-4,rx:10,fill:c==='O'?'none':'rgba(196,176,232,.18)',stroke:c==='O'?'rgba(156,232,192,.55)':'rgba(196,176,232,.5)','stroke-width':2,'stroke-dasharray':c==='O'?'6 6':'none'},svg))}
+  const gx=652,gy=90,gc=64,gg=10;T(svg,gx-10,46,'Score tiles · SRAM only',{class:'t24',fill:'#DCA972'});
+  const cells=[];for(let i=0;i<n;i++)for(let j=0;j<n;j++)cells.push({r:S('rect',{x:gx+j*(gc+gg),y:gy+i*(gc+gg),width:gc,height:gc,rx:8,fill:'#C4B0E8',opacity:.06},svg),lit:-99});
+  S('rect',{x:gx-8,y:gy-8,width:4*gc+3*gg+16,height:4*gc+3*gg+16,rx:12,fill:'none',stroke:'rgba(220,169,114,.55)','stroke-width':2,'stroke-dasharray':'8 9'},svg);
+  const sx=1000;S('rect',{x:sx,y:10,width:690,height:422,rx:16,fill:'rgba(156,232,192,.06)',stroke:'rgba(156,232,192,.5)','stroke-width':2},svg);
+  T(svg,sx+20,46,'SRAM · on chip · ~19 TB/s',{class:'t24',fill:'#9CE8C0'});
+  const slot=(x,y,w,l)=>{const g=S('g',{},svg);const r=S('rect',{x,y,width:w,height:68,rx:10,fill:'rgba(255,255,255,.05)',stroke:'rgba(196,176,232,.45)','stroke-width':2},g);const t=T(g,x+w/2,y+44,l,{class:'t26b','text-anchor':'middle',fill:'rgba(238,232,246,.4)'});return{r,t,x,y,w}};
+  const sl={Q:slot(sx+24,70,150,'Q tile'),K:slot(sx+192,70,150,'K tile'),V:slot(sx+360,70,150,'V tile'),S:slot(sx+528,70,140,'S tile'),O:slot(sx+24,158,318,'O (running)'),m:slot(sx+360,158,150,'m'),l:slot(sx+528,158,140,'ℓ')};
+  const rd=T(svg,sx+24,290,'',{class:'t26b',fill:'#fff'}),wr=T(svg,sx+24,340,'',{class:'t26b',fill:'#fff'}),nn=T(svg,sx+24,390,'',{class:'t26b',fill:'#9CE8C0'});
+  const fly=[0,1].map(()=>S('rect',{width:bw,height:bhh-4,rx:10,fill:'#DCA972',opacity:.9,style:'display:none'},svg));
+  const ev=[];let t0=0;for(let i=0;i<n;i++){ev.push({k:'q',i,t:t0,d:.8});t0+=.8;for(let j=0;j<n;j++){ev.push({k:'kv',i,j,t:t0,d:.8});t0+=.8;ev.push({k:'s',i,j,t:t0,d:.7});t0+=.7}ev.push({k:'w',i,t:t0,d:.9});t0+=.9}
+  const TOT=t0+1.2;let tt=0,play=true,ac=autoCtl();
+  const sub='₀₁₂₃';
+  function draw(){const tc=RM?TOT-1:tt%TOT;let e=ev.length-1;for(let k=0;k<ev.length;k++)if(ev[k].t<=tc&&tc<ev[k].t+ev[k].d){e=k;break}if(tc>=TOT-1.2)e=ev.length;
+    const E=ev[Math.min(e,ev.length-1)],f=e<ev.length?(tc-E.t)/E.d:1;let reads=0,writes=0;
+    ev.forEach((v,k)=>{if(k<e||(k===e&&f>.95)){if(v.k==='q')reads++;if(v.k==='kv')reads+=2;if(v.k==='w')writes++}});
+    const ci=e<ev.length?E.i:n,cj=E.j??-1;
+    for(const c of ['Q','K','V'])blk[c].forEach((r,b)=>{const on=(c==='Q'&&b===ci)||((c==='K'||c==='V')&&b===cj&&e<ev.length&&E.k!=='q'&&E.k!=='w');attr(r,{stroke:on?'#DCA972':'rgba(196,176,232,.5)','stroke-width':on?4:2})});
+    blk.O.forEach((r,b)=>{const dn=b<ci||(b===ci&&E.k==='w'&&f>.95);attr(r,{fill:dn?'rgba(156,232,192,.7)':'none','stroke-dasharray':dn?'none':'6 6'})});
+    cells.forEach((c,idx)=>{const i=Math.floor(idx/n),j=idx%n;let a=.06;if(i<ci||(i===ci&&j<(E.k==='s'?cj:E.k==='kv'?cj:E.k==='w'?n:0)))a=.06+.32*Math.max(0,1-(tc-c.lit)/2.5);
+      if(e<ev.length&&E.k==='s'&&i===E.i&&j===E.j){a=1;c.lit=tc;c.r.setAttribute('fill','#DCA972')}else c.r.setAttribute('fill','#C4B0E8');c.r.setAttribute('opacity',a.toFixed(3))});
+    const fill=(s,on,label)=>{attr(s.r,{fill:on?'rgba(196,176,232,.28)':'rgba(255,255,255,.05)',stroke:on?'#C4B0E8':'rgba(196,176,232,.45)'});s.t.textContent=label;s.t.setAttribute('fill',on?'#fff':'rgba(238,232,246,.4)')};
+    const live=e<ev.length;fill(sl.Q,live&&!(E.k==='q'&&f<.95),live?'Q'+sub[ci]:'Q tile');
+    const kvOn=live&&(E.k==='s'||(E.k==='kv'&&f>.95));fill(sl.K,kvOn,kvOn?'K'+sub[cj]:'K tile');fill(sl.V,kvOn,kvOn?'V'+sub[cj]:'V tile');
+    fill(sl.S,live&&E.k==='s',live&&E.k==='s'?'S'+sub[ci]+sub[cj]:'S tile');attr(sl.S.r,{stroke:live&&E.k==='s'?'#DCA972':'rgba(196,176,232,.45)'});
+    const oOn=live&&!(E.k==='q'&&f<.95);fill(sl.O,oOn,oOn?'O'+sub[ci]+'  · updated '+(E.k==='w'?n:E.k==='s'&&f>.5?cj+1:Math.max(0,cj))+' / '+n:'O (running)');fill(sl.m,oOn,'m');fill(sl.l,oOn,'ℓ');
+    rd.textContent=`HBM reads: ${reads} tiles`;wr.textContent=`HBM writes: ${writes} tiles`;nn.textContent='N × N written to HBM: 0';
+    fly.forEach(r=>r.style.display='none');if(!live||RM)return;const q=ease(Math.min(1,f/.9));
+    const go=(r,x0,y0,s)=>{r.style.display='';attr(r,{x:lerp(x0-bw/2,s.x+s.w/2-bw/2,q),y:lerp(y0,s.y,q)})};
+    if(E.k==='q'&&f<.95)go(fly[0],cols.Q,by(E.i),sl.Q);
+    if(E.k==='kv'&&f<.95){go(fly[0],cols.K,by(E.j),sl.K);go(fly[1],cols.V,by(E.j),sl.V)}
+    if(E.k==='w'&&f<.95){const r=fly[0];r.style.display='';attr(r,{x:lerp(sl.O.x+sl.O.w/2-bw/2,cols.O-bw/2,q),y:lerp(sl.O.y,by(E.i),q),fill:'#9CE8C0'})}else fly[0].setAttribute('fill','#DCA972')}
+  const pb=$('#tlPlay');function setPlay(p){play=p;pb.textContent=p?'❚❚ Pause':'▶ Play';pb.classList.toggle('on',!p)}
+  pb.addEventListener('click',()=>setPlay(!play));
+  $('#tlStep').addEventListener('click',()=>{setPlay(false);const tc=tt%TOT,base=tt-tc;const nx=ev.find(v=>v.t>tc+.01);tt=nx?base+nx.t+nx.d*.97:base+TOT;draw()});
+  draw();H.tile={enter(){tt=0;setPlay(!RM)},tick(t,dt){if(play&&!RM)tt+=dt*.9;draw()}};})();
+
+/* ---------- 10 · the catch: partial-row softmax is wrong ---------- */
+(()=>{const ch=cv('catchCv'),x=ch.x;const s=[1.2,3.1,0.4,2.2,0.9,4.6,1.7,0.2,2.8,1.1,5.3,0.7];let nb=1,ac=autoCtl(),tAcc=0;
+  const sm=a=>{const m=Math.max(...a),e=a.map(v=>Math.exp(v-m)),z=e.reduce((p,q)=>p+q,0);return{p:e.map(v=>v/z),m,z}};
+  const R=rng('ctB',v=>{nb=v;ac.touch();draw()});
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const L=40,W=ch.w-L-10,sw=W/12,bw=40,hmax=118,sc=hmax/.7;const seen=s.slice(0,nb*4),pv=sm(seen),pt=sm(s);
+    const row=(y0,lab,vals,col,ok,mtxt,mcol)=>{x.font=`700 24px ${MONO}`;x.textAlign='left';x.textBaseline='alphabetic';x.fillStyle=C.ink;x.fillText(lab,L,y0-hmax-14);x.textAlign='right';x.fillStyle=mcol;x.fillText(mtxt,ch.w-10,y0-hmax-14);
+      x.strokeStyle=C.hair;x.lineWidth=2;x.beginPath();x.moveTo(L,y0);x.lineTo(ch.w-10,y0);x.stroke();
+      for(let i=0;i<12;i++){const cx=L+i*sw+sw/2;if(vals[i]==null){x.setLineDash([5,6]);x.strokeStyle=C.hair;x.strokeRect(cx-bw/2,y0-40,bw,40);x.setLineDash([]);x.fillStyle=C.mut2;x.textAlign='center';x.font=`500 24px ${MONO}`;x.fillText('?',cx,y0-12);continue}
+        const h=vals[i]*sc;x.fillStyle=col;rrect(x,cx-bw/2,y0-h,bw,h,5);x.fill()}};
+    const vv=s.map((v,i)=>i<nb*4?pv.p[i]:null),ok=nb===3;
+    row(172,"Tile's view",vv,ok?C.p:C.red,ok,`m = ${pv.m.toFixed(1)}`,ok?C.ok:C.red2);
+    for(let b=1;b<3;b++){const xx=L+b*4*sw;x.setLineDash([6,8]);x.strokeStyle=C.mut2;x.lineWidth=2;x.beginPath();x.moveTo(xx,20);x.lineTo(xx,ch.h-8);x.stroke();x.setLineDash([])}
+    x.font=`500 24px ${MONO}`;x.textAlign='center';x.fillStyle=C.mut;for(let i=0;i<12;i++)x.fillText(s[i].toFixed(1),L+i*sw+sw/2,204);
+    row(ch.h-10,'True softmax',pt.p,C.gold,true,`m = ${pt.m.toFixed(1)}`,C.gold);
+    $('#ctBv').textContent=nb+' / 3'}
+  renders.push(draw);draw();
+  H.catch={enter(){ac=autoCtl();nb=1;R.set(1);tAcc=0;draw()},tick(t,dt){if(RM||ac.user)return;tAcc+=dt;if(tAcc>1.9){tAcc=0;nb=nb%3+1;R.set(nb);draw()}}};})();
+
+/* ---------- 11 · online softmax, live ---------- */
+(()=>{const ch=cv('onCv'),x=ch.x;let s=[1.2,3.1,0.4,2.2,0.9,4.6,1.7,0.2,2.8,1.1,5.3,0.7],v=[.2,-.4,.9,.5,-.1,.8,.3,-.7,.6,-.2,.4,1.0];
+  let b=0,mFrom=null,mTo=null,tw=1,ac=autoCtl(),tAcc=0;
+  function stats(k){let m=-Infinity,l=0,o=0,c=null,hist=[];for(let q=0;q<k;q++){const blk=s.slice(q*4,q*4+4),vb=v.slice(q*4,q*4+4),mn=Math.max(m,...blk);c=q?Math.exp(m-mn):null;
+      const e=blk.map(z=>Math.exp(z-mn)),add=e.reduce((a,z)=>a+z,0),lo=l;l=(q?c*l:0)+add;o=(q?c*o:0)+e.reduce((a,z,i)=>a+z*vb[i],0);hist.push({mo:m,mn,c,lo,add,l});m=mn}return{m,l,o,c,hist}}
+  function exact(){const m=Math.max(...s),e=s.map(z=>Math.exp(z-m)),z=e.reduce((a,q)=>a+q,0);return e.reduce((a,q,i)=>a+q*v[i],0)/z}
+  function advance(){if(b>=3){b=0;mFrom=mTo=null;tw=1;return}const prev=b?stats(b).m:null;b++;const nw=stats(b).m;mFrom=prev??nw;mTo=nw;tw=(RM||prev===null||prev===nw)?1:0}
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const L=24,W=ch.w-L-10,sw=W/12,bw=44,base=330,hm=250;const md=mTo==null?0:lerp(mFrom,mTo,ease(tw));
+    x.font=`500 24px ${MONO}`;x.textBaseline='alphabetic';
+    for(let q=1;q<3;q++){const xx=L+q*4*sw;x.setLineDash([6,8]);x.strokeStyle='rgba(196,176,232,.4)';x.lineWidth=2;x.beginPath();x.moveTo(xx,40);x.lineTo(xx,ch.h-4);x.stroke();x.setLineDash([])}
+    x.strokeStyle='rgba(196,176,232,.35)';x.lineWidth=2;x.beginPath();x.moveTo(L,base);x.lineTo(ch.w-10,base);x.stroke();
+    x.setLineDash([4,6]);x.strokeStyle='rgba(220,169,114,.6)';x.beginPath();x.moveTo(L,base-hm);x.lineTo(ch.w-10,base-hm);x.stroke();x.setLineDash([]);x.fillStyle=C.goldD;x.textAlign='left';x.fillText('1 = e⁰ at the running max',L,base-hm-12);
+    for(let i=0;i<12;i++){const cx=L+i*sw+sw/2,seen=i<b*4;if(!seen){x.setLineDash([5,6]);x.strokeStyle='rgba(196,176,232,.4)';x.strokeRect(cx-bw/2,base-36,bw,36);x.setLineDash([]);}
+      else{const h=Math.exp(s[i]-md)*hm,newb=Math.floor(i/4)===b-1;x.fillStyle=newb?C.goldD:C.lil;rrect(x,cx-bw/2,base-Math.min(h,hm+30),bw,Math.min(h,hm+30),5);x.fill()}
+      x.fillStyle=seen?'#EEE8F6':'rgba(196,176,232,.55)';x.textAlign='center';x.fillText(s[i].toFixed(1),cx,base+34)}
+    for(let q=0;q<3;q++){x.fillStyle=q<b?C.goldD:'rgba(196,176,232,.6)';x.textAlign='center';x.fillText('block '+(q+1),L+q*4*sw+2*sw,ch.h-12)}
+    const st=b?stats(b):null;const H2=$('#onM'),Lh=$('#onL'),Ch=$('#onC');
+    H2.textContent=st?st.m.toFixed(1):'—';Lh.textContent=st?st.l.toFixed(2):'—';Ch.textContent=st&&st.c!=null?st.c.toFixed(2):'—';
+    let html='';if(!st)html='Press <span class="g">Next block</span> to read the first 4 keys.<br>Running state: m = −∞, ℓ = 0, o = 0.';
+    else{const hh=st.hist[b-1];html=b===1?`block 1 · m = <span class="g">${hh.mn.toFixed(1)}</span><br>ℓ = Σ e^(s − m) = <span class="p">${hh.l.toFixed(2)}</span><br>o = Σ e^(s − m)·v`
+      :`block ${b} · m = max(${hh.mo.toFixed(1)}, new) = <span class="g">${hh.mn.toFixed(1)}</span><br>c = e^(${hh.mo.toFixed(1)} − ${hh.mn.toFixed(1)}) = <span class="g">${hh.c.toFixed(2)}</span><br>ℓ = c·${hh.lo.toFixed(2)} + ${hh.add.toFixed(2)} = <span class="p">${hh.l.toFixed(2)}</span><br>o = c·o + Σ e^(s − m)·v`;
+      html+=b===3?`<br>out = o ÷ ℓ = <span class="ok">${(st.o/st.l).toFixed(3)}</span> · exact <span class="ok">${exact().toFixed(3)} ✓</span>`:`<br>out so far = <span class="p">${(st.o/st.l).toFixed(3)}</span> · exact ${exact().toFixed(3)}`}
+    const M=$('#onMath');if(M.innerHTML!==html)M.innerHTML=html;
+    if(st&&b>1&&st.c<.999){x.fillStyle=C.goldD;x.textAlign='right';x.font=`700 24px ${MONO}`;x.fillText(`old bars × c = ${st.c.toFixed(2)}`,ch.w-10,24)}}
+  $('#onNext').addEventListener('click',()=>{ac.touch();advance();draw()});
+  $('#onReset').addEventListener('click',()=>{ac.touch();b=0;mFrom=mTo=null;tw=1;draw()});
+  $('#onNew').addEventListener('click',()=>{ac.touch();s=s.map(()=>Math.round(Math.random()*55)/10);v=v.map(()=>Math.round((Math.random()*2-1)*10)/10);b=0;mFrom=mTo=null;tw=1;draw()});
+  renders.push(draw);draw();
+  H.online={enter(){ac=autoCtl();b=0;mFrom=mTo=null;tw=1;tAcc=0;if(RM){b=2;advance();}draw()},tick(t,dt){let ch2=false;if(tw<1){tw=Math.min(1,tw+dt/1.1);ch2=true}
+    if(!RM&&!ac.user){tAcc+=dt;if(tAcc>(b===3?3.4:2.4)){tAcc=0;advance();ch2=true}}if(ch2)draw()}};
+})();
+
+/* ---------- code panels (12 · algorithm, 17 · usage) ---------- */
+function codePanel(id,lines){const el=$('#'+id);el.innerHTML=lines.map((l,i)=>`<div class="ln" data-n="${i+1}"><span>${l||' '}</span></div>`).join('');return el}
+function codeSteps(el,map){return s=>{el.classList.toggle('focus',s>0);$$('.ln',el).forEach((ln,i)=>ln.classList.toggle('hl',s>0&&map[s].includes(i+1)))}}
+(()=>{const k=w=>`<span class="kw">${w}</span>`,f=w=>`<span class="fn">${w}</span>`,c=w=>`<span class="cm">${w}</span>`,n=w=>`<span class="nu">${w}</span>`;
+  const pad=(code,cm)=>{const vis=code.replace(/<[^>]+>/g,'').length;return code+' '.repeat(Math.max(2,31-vis))+c(cm)};
+  const el=codePanel('algoCode',[
+    pad(`${k('for')} i ${k('in')} Q_tiles:`,'# one thread block each'),
+    `    ${f('load')} Q_i   HBM → SRAM`,
+    pad(`    m = −∞;  ℓ = ${n('0')};  O_i = ${n('0')}`,'# running stats, on chip'),
+    `    ${k('for')} j ${k('in')} KV_tiles:`,
+    `        ${f('load')} K_j, V_j   HBM → SRAM`,
+    pad(`        S = Q_i @ K_jᵀ / √d`,'# tile only, not in HBM'),
+    `        m_new = ${f('max')}(m, ${f('rowmax')}(S))`,
+    `        P = ${f('exp')}(S − m_new)`,
+    pad(`        c = ${f('exp')}(m − m_new)`,'# rescale the past'),
+    `        ℓ = c·ℓ + ${f('rowsum')}(P)`,
+    `        O_i = c·O_i + P @ V_j`,
+    `        m = m_new`,
+    pad(`    O_i = O_i / ℓ`,'# normalise once'),
+    `    ${f('write')} O_i, L_i = m + ${f('log')} ℓ   → HBM`]);
+  H.algo={onStep:codeSteps(el,{1:[1,2,3],2:[4,5,6],3:[7,8,9,10,11,12],4:[13,14]})};})();
+(()=>{const k=w=>`<span class="kw">${w}</span>`,f=w=>`<span class="fn">${w}</span>`,c=w=>`<span class="cm">${w}</span>`,n=w=>`<span class="nu">${w}</span>`,s=w=>`<span class="st">${w}</span>`;
+  const el=codePanel('useCode',[
+    `${k('import')} torch, torch.nn.functional ${k('as')} F`,
+    `q, k, v = [torch.${f('randn')}(${n('8')}, ${n('16')}, ${n('4096')}, ${n('64')}, device=${s('"cuda"')},`,
+    `           dtype=torch.bfloat16) ${k('for')} _ ${k('in')} ${f('range')}(${n('3')})]`,
+    `out = F.${f('scaled_dot_product_attention')}(q, k, v, is_causal=${k('True')})`,
+    ``,
+    `${c('# force the FlashAttention backend')}`,
+    `${k('from')} torch.nn.attention ${k('import')} sdpa_kernel, SDPBackend`,
+    `${k('with')} ${f('sdpa_kernel')}(SDPBackend.FLASH_ATTENTION):`,
+    `    out = F.${f('scaled_dot_product_attention')}(q, k, v, is_causal=${k('True')})`,
+    ``,
+    `${c('# flash-attn library')}`,
+    `${k('from')} flash_attn ${k('import')} flash_attn_func`,
+    `qb, kb, vb = (t.${f('transpose')}(${n('1')}, ${n('2')}) ${k('for')} t ${k('in')} (q, k, v))`,
+    `out = ${f('flash_attn_func')}(qb, kb, vb, causal=${k('True')})`,
+    ``,
+    `${c('# Hugging Face transformers')}`,
+    `model = AutoModelForCausalLM.${f('from_pretrained')}(name,`,
+    `            attn_implementation=${s('"flash_attention_2"')})`]);
+  H.code={onStep:codeSteps(el,{1:[1,2,3,4],2:[6,7,8,9],3:[11,12,13,14],4:[16,17,18]})};})();
+
+/* ---------- 13 · HBM traffic model ---------- */
+(()=>{const ch=cv('ioCv'),x=ch.x;let N=4096,d=64,B=128;const h=32;
+  const std=N=>2*h*(4*N*d+8*N*N)/1e9,fl=N=>2*h*(2*N*d+2*N*N*d/B)/1e9;
+  rng('ioN',v=>{N=Math.pow(2,v);draw()});rng('ioD',v=>{d=Math.pow(2,v);draw()});rng('ioB',v=>{B=Math.pow(2,v);draw()});
+  function draw(){const L=112,R=ch.w-30,Tp=18,Bt=ch.h-54,X=n=>L+(Math.log2(n)-9)/8*(R-L),Y=gb=>Bt-(Math.log10(gb)+3)/7*(Bt-Tp);
+    x.clearRect(0,0,ch.w,ch.h);x.font=`500 24px ${MONO}`;x.textBaseline='middle';
+    [[-3,'1 MB'],[0,'1 GB'],[3,'1 TB']].forEach(([e,l])=>{x.strokeStyle='rgba(196,176,232,.18)';x.lineWidth=1.5;x.beginPath();x.moveTo(L,Y(Math.pow(10,e)));x.lineTo(R,Y(Math.pow(10,e)));x.stroke();x.fillStyle='rgba(196,176,232,.85)';x.textAlign='right';x.fillText(l,L-12,Y(Math.pow(10,e)))});
+    x.textAlign='center';[512,2048,8192,32768,131072].forEach(n=>{x.fillStyle='rgba(196,176,232,.85)';x.fillText(fmtN(n),X(n),Bt+30)});
+    const pts=[];for(let s=0;s<=160;s++)pts.push(Math.pow(2,9+s/160*8));
+    x.fillStyle='rgba(156,232,192,.10)';x.beginPath();pts.forEach((n,i)=>i?x.lineTo(X(n),Y(std(n))):x.moveTo(X(n),Y(std(n))));[...pts].reverse().forEach(n=>x.lineTo(X(n),Y(fl(n))));x.closePath();x.fill();
+    const line=(f,col)=>{x.strokeStyle=col;x.lineWidth=5;x.beginPath();pts.forEach((n,i)=>i?x.lineTo(X(n),Y(f(n))):x.moveTo(X(n),Y(f(n))));x.stroke()};line(std,'#FF8A8A');line(fl,C.mint);
+    x.font=`700 24px ${MONO}`;x.textAlign='left';x.fillStyle='#FF9A9A';x.fillText('standard',X(1024),Y(std(1024))-30);x.fillStyle=C.mint;x.fillText('flash',X(4096)+10,Y(fl(4096))+34);
+    x.setLineDash([6,8]);x.strokeStyle=C.goldD;x.lineWidth=2;x.beginPath();x.moveTo(X(N),Tp);x.lineTo(X(N),Bt);x.stroke();x.setLineDash([]);
+    [std(N),fl(N)].forEach(v=>{x.fillStyle=C.goldD;x.beginPath();x.arc(X(N),Y(v),11,0,TAU);x.fill()});
+    $('#ioNv').textContent=fmtInt(N);$('#ioDv').textContent=d;$('#ioBv').textContent=B;$('#ioS').textContent=fmtGB(std(N));$('#ioF').textContent=fmtGB(fl(N));$('#ioR').textContent=(std(N)/fl(N)).toFixed(1)+'×'}
+  renders.push(draw);draw();H.io={};})();
+
+/* ---------- 14 · backward: what is saved ---------- */
+(()=>{const svg=$('#bwdSvg');const sq=270,top=96;
+  const col=(x0,title,flash)=>{T(svg,x0,40,title,{class:'t26b',fill:C.ink});
+    ['Q','K','V','O'].forEach((q,i)=>{S('rect',{x:x0+i*16,y:top,width:6,height:sq,rx:2,fill:C.mid2},svg);T(svg,x0+i*16+3,top+sq+30,q,{class:'t24','text-anchor':'middle',fill:C.mut})});
+    const px=x0+80;if(!flash){const r=S('rect',{x:px,y:top,width:sq,height:sq,rx:8,fill:'rgba(204,75,75,.30)',stroke:C.red,'stroke-width':3},svg);const t=T(svg,px+sq/2,top+sq/2+10,'P · N × N',{class:'t30b','text-anchor':'middle',fill:C.red2});return[r,t]}
+    S('rect',{x:px,y:top,width:sq,height:sq,rx:8,fill:'none',stroke:C.hair,'stroke-width':2.5,'stroke-dasharray':'8 8'},svg);T(svg,px+sq/2,top+sq/2-6,'recomputed',{class:'t26b','text-anchor':'middle',fill:C.mut2});T(svg,px+sq/2,top+sq/2+28,'in SRAM',{class:'t26b','text-anchor':'middle',fill:C.mut2});
+    S('rect',{x:x0+66,y:top,width:4,height:sq,rx:2,fill:C.gold},svg);T(svg,x0+68,top+sq+30,'L',{class:'t24','text-anchor':'middle',fill:C.gold});return null};
+  const P=col(14,'Standard keeps',false);col(400,'FlashAttention keeps',true);
+  T(svg,14,top+sq+80,'≈ 35.7 MB per head',{class:'t30b',fill:C.red2});T(svg,400,top+sq+80,'≈ 2.1 MB per head',{class:'t30b',fill:C.ok});
+  T(svg,14,top+sq+118,'Q K V O: 0.5 MB each',{class:'t24',fill:C.mut});T(svg,400,top+sq+118,'L: one number per row',{class:'t24',fill:C.mut});
+  const ch=cv('bwdCv'),x=ch.x;const M=[['GFLOPs',66.6,75.2,''],['HBM R/W',40.3,4.4,' GB'],['Runtime',41.7,7.3,' ms']];let anim=1;
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const L=170,R=ch.w-120;x.font=`500 24px ${MONO}`;x.textBaseline='middle';
+    [[C.lil2,'standard'],[C.p,'flash']].forEach(([c,l],i)=>{x.fillStyle=c;x.fillRect(L+i*200,8,22,22);x.fillStyle=C.mut;x.textAlign='left';x.fillText(l,L+i*200+32,20)});
+    M.forEach(([n,a,b,u],i)=>{const y=46+i*74,mx=Math.max(a,b),k=ease(anim);x.fillStyle=C.ink;x.font=`700 24px ${MONO}`;x.textAlign='right';x.fillText(n,L-16,y+29);
+      [[a,C.lil2],[b,C.p]].forEach(([v,c],j)=>{const w=(R-L)*v/mx*k;x.fillStyle=c;rrect(x,L,y+j*31,Math.max(w,4),27,5);x.fill();x.fillStyle=C.ink;x.font=`600 24px ${MONO}`;x.textAlign='left';x.fillText(v+u,L+w+10,y+j*31+14)})})}
+  renders.push(draw);draw();
+  H.bwd={enter(){anim=RM?1:0;if(P&&!RM){P[0].style.transformBox='view-box';P[0].style.transformOrigin='94px 96px';P[0].animate([{transform:'scale(.2)',opacity:0},{transform:'none',opacity:1}],{duration:900,easing:'cubic-bezier(.2,.8,.2,1)'})}},tick(t,dt){if(anim<1){anim=Math.min(1,anim+dt/1.3);draw()}}};})();
+
+/* ---------- 15 · count-up ---------- */
+(()=>{const el=$('#resK');let t=0,run=false;H.results={enter(){t=0;run=!RM;el.textContent=RM?'7.6':'0.0'},tick(_,dt){if(!run)return;t+=dt;el.textContent=(7.6*ease(t/1.6)).toFixed(1);if(t>=1.6)run=false}};})();
+
+/* ---------- 16 · utilisation bars, aligned with the four cards ---------- */
+(()=>{const ch=cv('evoCv'),x=ch.x;const V=[['FA1 · A100',25,40],['FA2 · A100',50,73],['FA3 · H100',75,75],['FA4 · B200',71,71]];let anim=1,pat=null;
+  function draw(){if(!pat)pat=hatch(x,'rgba(78,9,115,.5)');x.clearRect(0,0,ch.w,ch.h);const cw=(ch.w-3*20)/4;
+    V.forEach(([n,a,b],i)=>{const x0=i*(cw+20),k=ease(anim),W=cw-10;x.font=`500 24px ${MONO}`;x.textBaseline='middle';x.textAlign='left';x.fillStyle=C.mut2;x.fillText('% OF PEAK FLOPs',x0,22);
+      x.fillStyle=C.bg2||'#EEE8F6';rrect(x,x0,52,W,40,8);x.fillStyle='#EEE8F6';x.fill();
+      x.fillStyle=C.p;rrect(x,x0,52,Math.max(6,W*a/100*k),40,8);x.fill();if(b>a){x.fillStyle=pat;x.fillRect(x0+W*a/100*k,52,W*(b-a)/100*k,40)}
+      x.font=`850 52px ${ARCH}`;x.fillStyle=C.p;x.fillText((a===b?Math.round(a*k):Math.round(a*k)+'–'+Math.round(b*k))+'%',x0,140)})}
+  renders.push(draw);draw();H.evo={enter(){anim=RM?1:0},tick(t,dt){if(anim<1){anim=Math.min(1,anim+dt/1.4);draw()}}};})();
+
+/* ---------- 18 · growth curves: compute stays N², memory becomes N ---------- */
+(()=>{const ch=cv('limCv'),x=ch.x;let anim=1;
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const L=100,R=ch.w-30,Tp=20,B=ch.h-60,X=n=>L+(Math.log2(n)-10)/7*(R-L),Y=v=>B-Math.log10(v)/5*(B-Tp);x.font=`500 24px ${MONO}`;x.textBaseline='middle';
+    [0,1,2,3,4,5].forEach(e=>{x.strokeStyle='#E6DDF2';x.lineWidth=1.5;x.beginPath();x.moveTo(L,Y(Math.pow(10,e)));x.lineTo(R,Y(Math.pow(10,e)));x.stroke();if(e%2===0){x.fillStyle=C.mut;x.textAlign='right';x.fillText(e===0?'1×':e===2?'100×':'10K×',L-12,Y(Math.pow(10,e)))}});
+    x.textAlign='center';[1024,4096,16384,65536,131072].forEach(n=>{x.fillStyle=C.mut;x.fillText(fmtN(n),X(n),B+28)});
+    const end=Math.pow(2,10+7*ease(anim));const line=(f,col,w,dash)=>{x.setLineDash(dash||[]);x.strokeStyle=col;x.lineWidth=w;x.beginPath();for(let s=0;s<=120;s++){const n=Math.pow(2,10+s/120*(Math.log2(end)-10));s?x.lineTo(X(n),Y(f(n))):x.moveTo(X(n),Y(f(n)))}x.stroke();x.setLineDash([])};
+    const q=n=>Math.pow(n/1024,2),l=n=>n/1024;line(q,C.p,6);line(q,C.red,3,[10,10]);line(l,C.ok,5);
+    x.font=`600 24px ${MONO}`;x.textAlign='left';[[C.p,'FLOPs · both'],[C.red,'memory · standard'],[C.ok,'memory · flash']].forEach(([c,l],i)=>{x.fillStyle=c;x.fillRect(L+16,Tp+14+i*34,26,8);x.fillStyle=C.ink;x.fillText(l,L+54,Tp+18+i*34)});if(anim>=1){x.font=`700 24px ${MONO}`;x.textAlign='right';x.fillStyle=C.p;x.fillText('×16,384',R-14,Y(16384)+30);x.fillStyle=C.ok;x.fillText('×128',R-14,Y(128)+30)}}
+  renders.push(draw);draw();H.limits={enter(){anim=RM?1:0},tick(t,dt){if(anim<1){anim=Math.min(1,anim+dt/1.4);draw()}}};})();
+
+/* ---------- NEW A · subtracting the max changes nothing ---------- */
+(()=>{const ch=cv('safeCv'),x=ch.x;const s0=[2,5,1,3];let k=0,ac=autoCtl(),tA=0,dir=1;
+  const R=rng('sfK',v=>{k=v;ac.touch();draw()});
+  const fmtE=v=>v>65504?'inf ✗':v>=1000?fmtInt(v):v>=10?v.toFixed(1):v.toPrecision(3);
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const s=s0.map(v=>v+k),m=Math.max(...s),e=s.map(v=>Math.exp(v-m)),z=e.reduce((a,b)=>a+b,0),p=e.map(v=>v/z);
+    const L=250,cw=148,cx=i=>L+i*cw+cw/2;x.textBaseline='middle';
+    [['score s',44],['e^s · FP16',104],['e^(s − m)',164]].forEach(([l,y])=>{x.font=`500 24px ${MONO}`;x.fillStyle='rgba(196,176,232,.9)';x.textAlign='left';x.fillText(l,8,y);x.strokeStyle='rgba(196,176,232,.15)';x.lineWidth=1.5;x.beginPath();x.moveTo(8,y+30);x.lineTo(ch.w-8,y+30);x.stroke()});
+    s.forEach((v,i)=>{x.textAlign='center';x.font=`700 26px ${MONO}`;x.fillStyle='#fff';x.fillText(v.toFixed(0),cx(i),44);
+      const ev=Math.exp(v),bad=ev>65504;x.fillStyle=bad?'#FF9A9A':'#EEE8F6';x.fillText(fmtE(ev),cx(i),104);
+      x.fillStyle=v===m?C.goldD:C.mint;x.fillText(e[i].toFixed(3),cx(i),164)});
+    x.font=`500 24px ${MONO}`;x.fillStyle='rgba(196,176,232,.9)';x.textAlign='left';x.fillText('softmax p',8,250);x.fillText('never moves',8,282);
+    const base=416,hm=190;x.strokeStyle='rgba(196,176,232,.35)';x.beginPath();x.moveTo(L,base);x.lineTo(ch.w-8,base);x.stroke();
+    p.forEach((v,i)=>{const h=v*hm/.85;x.fillStyle=C.lil;rrect(x,cx(i)-34,base-h,68,h,6);x.fill();x.fillStyle='#fff';x.textAlign='center';x.font=`700 24px ${MONO}`;x.fillText(v.toFixed(3),cx(i),base-h-20)});
+    $('#sfKv').textContent=(k>=0?'+':'')+k;const big=Math.exp(m),el=$('#sfBig');el.textContent=fmtE(big);el.className='v '+(big>65504?'bad':'gold')}
+  renders.push(draw);draw();
+  H.safe={enter(){ac=autoCtl();k=0;R.set(0);tA=0;dir=1;draw()},tick(t,dt){if(RM||ac.user)return;tA+=dt;if(tA>.45){tA=0;k+=dir;if(k>=9||k<=-3)dir*=-1;R.set(k);draw()}}};})();
+
+/* ---------- NEW B · a new max is a change of units ---------- */
+(()=>{const ch=cv('unitsCv'),x=ch.x;const old=[1.2,3.1,0.4,2.2],nw=[0.9,4.6,1.7,0.2],m0=3.1,m1=4.6;let t=0,ac=autoCtl(),tA=0,hold=0,tgt=0;
+  const R=rng('unT',v=>{t=v/100;tgt=t;ac.touch();draw()});
+  const l0=old.reduce((a,s)=>a+Math.exp(s-m0),0),addN=nw.reduce((a,s)=>a+Math.exp(s-m1),0),c=Math.exp(m0-m1);
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const mv=lerp(m0,m1,t),base=296,U=190,bw=46,sw=66,L=20;x.textBaseline='middle';
+    x.setLineDash([6,8]);x.strokeStyle=C.gold;x.lineWidth=2;x.beginPath();x.moveTo(L,base-U);x.lineTo(560,base-U);x.stroke();x.setLineDash([]);
+    x.font=`600 24px ${MONO}`;x.fillStyle=C.gold;x.textAlign='left';x.fillText(`1 = e⁰ at m = ${mv.toFixed(2)}`,L,base-U-22);
+    x.strokeStyle=C.hair;x.lineWidth=2;x.beginPath();x.moveTo(L,base);x.lineTo(560,base);x.stroke();
+    [...old,...nw].forEach((s,i)=>{const isNew=i>=4,cx=L+i*sw+sw/2+(isNew?14:0),h=Math.min(Math.exp(s-mv)*U,U*4.5);x.globalAlpha=isNew?t:1;
+      x.fillStyle=isNew?C.gold:C.mid2;rrect(x,cx-bw/2,base-h,bw,h,5);x.fill();x.fillStyle=C.mut;x.font=`500 24px ${MONO}`;x.textAlign='center';x.fillText(s.toFixed(1),cx,base+26);x.globalAlpha=1});
+    x.textAlign='center';x.fillStyle=C.mut2;x.fillText('block 1',L+2*sw,base+62);x.globalAlpha=Math.max(.25,t);x.fillText('block 2',L+6*sw+14,base+62);x.globalAlpha=1;
+    // jar for ℓ
+    const jx=640,jw=110,sc=88,cl=lerp(1,c,t),oldH=l0*cl*sc,newH=addN*t*sc;
+    x.strokeStyle=C.hair;x.lineWidth=2;x.strokeRect(jx,base-l0*sc-10,jw,l0*sc+10);x.font=`700 24px ${MONO}`;x.fillStyle=C.ink;x.textAlign='center';x.fillText('ℓ',jx+jw/2,base-l0*sc-34);
+    x.fillStyle=C.mid2;x.fillRect(jx+6,base-oldH,jw-12,oldH);x.fillStyle=C.gold;x.globalAlpha=t;x.fillRect(jx+6,base-oldH-newH,jw-12,newH);x.globalAlpha=1;
+    x.fillStyle=C.ink;x.font=`600 24px ${MONO}`;x.fillText((l0*cl+addN*t).toFixed(2),jx+jw/2,base+26);
+    x.textAlign='left';x.font=`700 24px ${MONO}`;x.fillStyle=C.p;x.fillText(`c = e^(3.1 − ${mv.toFixed(1)}) = ${cl.toFixed(2)}`,L,22);
+    $('#unTv').textContent=mv.toFixed(1)}
+  renders.push(draw);draw();
+  H.units={enter(){ac=autoCtl();t=0;tgt=1;hold=1.2;R.set(0);draw()},tick(T,dt){if(RM){if(t!==1){t=1;R.set(100);draw()}return}if(ac.user)return;
+    if(hold>0){hold-=dt;return}const d=tgt-t;if(Math.abs(d)<.004){t=tgt;tgt=1-tgt;hold=2.2;}else t+=Math.sign(d)*Math.min(Math.abs(d),dt/1.4);R.set(Math.round(t*100));draw()}};})();
+
+/* ---------- NEW C · ℓ and O get the same correction ---------- */
+(()=>{const ch=cv('ofCv'),x=ch.x;const s=[1.2,3.1,0.4,2.2,0.9,4.6,1.7,0.2,2.8,1.1,5.3,0.7],D=4;
+  const V=s.map((_,j)=>Array.from({length:D},(_,d)=>Math.round(Math.sin(j*1.7+d*2.3+.4)*10)/10));
+  const exact=(()=>{const m=Math.max(...s),e=s.map(z=>Math.exp(z-m)),z=e.reduce((a,b)=>a+b,0);return Array.from({length:D},(_,d)=>e.reduce((a,w,j)=>a+w*V[j][d],0)/z)})();
+  const states=[{m:-Infinity,l:0,o:[0,0,0,0]}];for(let b=0;b<3;b++){const p=states[b],blk=s.slice(b*4,b*4+4),mn=Math.max(p.m,...blk),c=b?Math.exp(p.m-mn):0,e=blk.map(z=>Math.exp(z-mn));
+    states.push({m:mn,c:b?c:null,l:c*p.l+e.reduce((a,w)=>a+w,0),scaledL:c*p.l,scaledO:p.o.map(v=>v*c),o:p.o.map((v,d)=>c*v+e.reduce((a,w,i)=>a+w*V[b*4+i][d],0))})}
+  let b=0,ph=1,ac=autoCtl(),tA=0;// ph: 0..1 = scale, 1..2 = add
+  function cur(){const S=states[b];if(b===0)return{l:0,o:[0,0,0,0],lnew:0,onew:[0,0,0,0]};const P=states[b-1],k1=clamp(ph,0,1),k2=clamp(ph-1,0,1);
+    const lS=lerp(P.l,S.scaledL,ease(k1)),oS=P.o.map((v,d)=>lerp(v,S.scaledO[d],ease(k1)));return{l:lS,o:oS,lnew:(S.l-S.scaledL)*ease(k2),onew:S.o.map((v,d)=>(v-S.scaledO[d])*ease(k2))}}
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const st=cur(),S=states[b];x.textBaseline='middle';
+    let msg=b===0?'Start: m = −∞, ℓ = 0, O = 0':ph<1&&b>1?`New max ${S.m.toFixed(1)}: ℓ and O × c = ${S.c.toFixed(2)}`:ph<2?`Block ${b}: add Σ e^(s − m)·v`:b===3?'Done: output = O ÷ ℓ':`Block ${b} added · m = ${S.m.toFixed(1)}`;
+    x.font=`700 26px ${MONO}`;x.fillStyle=C.goldD;x.textAlign='left';x.fillText(msg,10,24);
+    const base=400,ls=110;x.font=`600 24px ${MONO}`;x.textAlign='center';
+    // ℓ bar
+    x.fillStyle='rgba(196,176,232,.9)';x.fillText('ℓ',85,72);x.strokeStyle='rgba(196,176,232,.35)';x.lineWidth=2;x.beginPath();x.moveTo(30,base);x.lineTo(140,base);x.stroke();
+    x.fillStyle=C.lil;x.fillRect(50,base-st.l*ls,70,st.l*ls);x.fillStyle=C.goldD;x.fillRect(50,base-st.l*ls-st.lnew*ls,70,st.lnew*ls);
+    x.fillStyle='#fff';x.fillText((st.l+st.lnew).toFixed(2),85,base-(st.l+st.lnew)*ls-22);
+    // O bars
+    const zy=250,os=95,ox=d=>215+d*80;x.fillStyle='rgba(196,176,232,.9)';x.fillText('O (unnormalised)',335,72);x.strokeStyle='rgba(196,176,232,.35)';x.beginPath();x.moveTo(180,zy);x.lineTo(490,zy);x.stroke();
+    for(let d=0;d<D;d++){const a=st.o[d],n=st.onew[d];x.fillStyle=C.lil;x.fillRect(ox(d)-26,zy-Math.max(a,0)*os,52,Math.abs(a)*os);
+      const y0=zy-a*os,y1=zy-(a+n)*os;x.fillStyle=C.goldD;x.fillRect(ox(d)-26,Math.min(y0,y1),52,Math.abs(y1-y0))}
+    x.fillStyle='rgba(196,176,232,.9)';x.fillText('d₁   d₂   d₃   d₄',335,base+16);
+    // output
+    const done=b===3&&ph>=2,qx=d=>615+d*60,qs=120;x.fillStyle='rgba(196,176,232,.9)';x.fillText('O ÷ ℓ',705,72);x.strokeStyle='rgba(196,176,232,.35)';x.beginPath();x.moveTo(570,zy);x.lineTo(830,zy);x.stroke();
+    for(let d=0;d<D;d++){x.setLineDash([5,5]);x.strokeStyle=C.mint;x.lineWidth=2;const ey=zy-exact[d]*qs;x.strokeRect(qx(d)-20,Math.min(ey,zy),40,Math.abs(exact[d]*qs));x.setLineDash([]);
+      if(done||b>0){const L2=(st.l+st.lnew)||1,v=(st.o[d]+st.onew[d])/L2;x.globalAlpha=done?1:.35;x.fillStyle=done?C.mint:C.lil2;x.fillRect(qx(d)-16,Math.min(zy-v*qs,zy),32,Math.abs(v*qs));x.globalAlpha=1}}
+    x.font=`600 24px ${MONO}`;x.fillStyle=done?C.mint:'rgba(196,176,232,.7)';x.fillText(done?'matches exact ✓':'dashed = exact',705,base+16)}
+  function next(){if(b>=3&&ph>=2){b=0;ph=2}else{if(ph<2&&b>0){ph=2}else{b++;ph=b>1?0:1}}}
+  $('#ofNext').addEventListener('click',()=>{ac.touch();next();draw()});$('#ofReset').addEventListener('click',()=>{ac.touch();b=0;ph=2;draw()});
+  renders.push(draw);draw();
+  H.outfix={enter(){ac=autoCtl();b=0;ph=2;tA=0;if(RM){b=3;ph=2}draw()},tick(t,dt){let ch2=false;if(b>0&&ph<2&&!RM){ph=Math.min(2,ph+dt/.9);ch2=true}
+    if(!RM&&!ac.user&&ph>=2){tA+=dt;if(tA>(b===3?3.2:1.4)){tA=0;next();ch2=true}}if(ch2)draw()}};})();
+
+/* ---------- NEW D · by-hand trace table ---------- */
+(()=>{const s=[1.2,3.1,0.4,2.2,0.9,4.6,1.7,0.2,2.8,1.1,5.3,0.7],v=[.2,-.4,.9,.5,-.1,.8,.3,-.7,.6,-.2,.4,1.0];
+  const f2=z=>z.toFixed(2),sg=z=>(z<0?'−':'')+Math.abs(z).toFixed(2),f1=z=>(z<0?'−':'')+Math.abs(z).toFixed(1);
+  let m=-Infinity,l=0,o=0;const rows=[`<tr><th>Block</th><th>scores s</th><th>values v</th><th>m</th><th>c</th><th>ℓ</th><th>o</th><th>o ÷ ℓ</th></tr>`,
+    `<tr><td>start</td><td class="dim">—</td><td class="dim">—</td><td>−∞</td><td class="dim">—</td><td>0</td><td>0</td><td class="dim">—</td></tr>`];
+  for(let b=0;b<3;b++){const bs=s.slice(b*4,b*4+4),bv=v.slice(b*4,b*4+4),mn=Math.max(m,...bs),c=b?Math.exp(m-mn):null,e=bs.map(z=>Math.exp(z-mn));
+    l=(b?c*l:0)+e.reduce((a,w)=>a+w,0);o=(b?c*o:0)+e.reduce((a,w,i)=>a+w*bv[i],0);const up=mn>m;m=mn;
+    rows.push(`<tr data-step="${b+1}"><td>${b+1}</td><td>${bs.map(f1).join(' ')}</td><td>${bv.map(f1).join(' ')}</td><td class="${up?'hlc':''}">${m.toFixed(1)}</td><td class="${c!=null&&c<1?'hlc':'dim'}">${c==null?'—':f2(c)}</td><td>${f2(l)}</td><td>${sg(o)}</td><td>${sg(o/l)}</td></tr>`)}
+  const M=Math.max(...s),e=s.map(z=>Math.exp(z-M)),Z=e.reduce((a,b)=>a+b,0),ex=e.reduce((a,w,i)=>a+w*v[i],0)/Z;
+  rows.push(`<tr class="ex" data-step="4"><td>exact</td><td colspan="2">softmax over all 12 at once</td><td>${M.toFixed(1)}</td><td>—</td><td>${f2(Z)}</td><td>${sg(ex*Z)}</td><td>${sg(ex)} ✓</td></tr>`);
+  $('#traceTbl').innerHTML=rows.join('');H.trace={};})();
+
+/* ================= EASY ONLINE SOFTMAX ================= */
+/* jar drawing helper: a glass jar with a fill level */
+function jar(x,cx,top,bot,w,frac,col,label,val,dark,extra){const L=cx-w/2;
+  x.strokeStyle=dark?'rgba(196,176,232,.6)':C.hair;x.lineWidth=3;x.beginPath();x.moveTo(L,top);x.lineTo(L,bot-12);x.quadraticCurveTo(L,bot,L+12,bot);x.lineTo(L+w-12,bot);x.quadraticCurveTo(L+w,bot,L+w,bot-12);x.lineTo(L+w,top);x.stroke();
+  const h=Math.max(0,Math.min(1,frac))*(bot-top-6);x.fillStyle=col;rrect(x,L+6,bot-6-h,w-12,h,6);x.fill();
+  if(extra&&extra.h>0){x.fillStyle=extra.col;rrect(x,L+6,bot-6-h-extra.h*(bot-top-6),w-12,extra.h*(bot-top-6),6);x.fill()}
+  x.textAlign='center';x.textBaseline='middle';x.font=`700 24px ${MONO}`;x.fillStyle=dark?'#fff':C.ink;x.fillText(label,cx,top-22);
+  x.font=`800 30px ${ARCH}`;x.fillStyle=dark?C.goldD:C.p;x.fillText(val,cx,bot+30)}
+
+/* ---------- EASY 1 · the pie: every newcomer changes every slice ---------- */
+(()=>{const ch=cv('pieCv'),x=ch.x;const K=[['The',1],['cat',6],['sat',2],['on',1],['the',1],['mat',3]];
+  const cols=['#AD9CD5','#4E0973','#8E6420','#C4B0E8','#D6CCE8','#7A53A2'];let n=1,fr=K.map((k,i)=>i===0?1:0),tt=0;
+  function target(){const tot=K.slice(0,n).reduce((a,k)=>a+k[1],0);return K.map((k,i)=>i<n?k[1]/tot:0)}
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const cx=230,cy=270,R=205;let a=-Math.PI/2;
+    K.forEach((k,i)=>{const f=fr[i];if(f<.001)return;x.fillStyle=cols[i];x.beginPath();x.moveTo(cx,cy);x.arc(cx,cy,R,a,a+f*TAU);x.closePath();x.fill();x.strokeStyle='#fff';x.lineWidth=3;x.stroke();
+      if(f>.06){const m=a+f*TAU/2;x.fillStyle=[1,2,5].includes(i)?'#fff':C.ink;x.font=`700 26px ${MONO}`;x.textAlign='center';x.textBaseline='middle';x.fillText(k[0],cx+Math.cos(m)*R*.62,cy+Math.sin(m)*R*.62)}a+=f*TAU});
+    const tot=K.slice(0,n).reduce((s,k)=>s+k[1],0);x.textAlign='left';x.textBaseline='middle';
+    x.font=`500 24px ${MONO}`;x.fillStyle=C.mut2;x.fillText('KEY',480,40);x.fillText('PTS',600,40);x.fillText('SLICE',690,40);
+    K.forEach((k,i)=>{const y=96+i*62,on=i<n,newest=i===n-1;x.globalAlpha=on?1:.3;x.fillStyle=cols[i];rrect(x,480,y-14,26,28,5);x.fill();
+      x.font=`${newest?800:600} 26px ${MONO}`;x.fillStyle=newest?C.gold:C.ink;x.fillText(k[0],520,y);x.fillText(on?String(k[1]):'?',612,y);x.fillText(on?Math.round(fr[i]*100)+'%':'—',690,y);x.globalAlpha=1});
+    x.strokeStyle=C.hair;x.lineWidth=2;x.beginPath();x.moveTo(480,470);x.lineTo(790,470);x.stroke();
+    x.font=`700 26px ${MONO}`;x.fillStyle=C.p;x.fillText('total',520,500);x.fillText(String(tot),612,500);x.fillText('100%',690,500)}
+  renders.push(draw);draw();
+  H.pie={enter(){n=RM?K.length:1;tt=0;fr=target();draw()},tick(t,dt){if(RM)return;tt+=dt;const nn=tt<K.length*1.5?Math.min(K.length,1+Math.floor(tt/1.5)):K.length;if(tt>K.length*1.5+3.5){tt=0}
+    if(nn!==n){n=nn}const tg=target();let mv=false;fr=fr.map((f,i)=>{const d=tg[i]-f;if(Math.abs(d)>.0005)mv=true;return f+d*Math.min(1,dt*5)});if(mv||tt<.05)draw()}};})();
+
+/* ---------- EASY 2 · two jars: keep a tally, divide at the end ---------- */
+(()=>{const ch=cv('jarCv'),x=ch.x;const P=[2,5,1,3,4,1,6,2],Vv=[10,40,20,30,50,10,60,20];
+  const T1=P.reduce((a,b)=>a+b,0),T2=P.reduce((a,p,i)=>a+p*Vv[i],0);
+  const kx=i=>20+i*96+(i>=4?30:0),arr=i=>0.8+i*0.75+(i>=4?1:0),END=arr(7)+0.7,LOOP=END+4;let tt=0;
+  function state(){let j1=0,j2=0,fl=[];P.forEach((p,i)=>{const f=clamp((tt-arr(i))/.6,0,1);if(f>=1){j1+=p;j2+=p*Vv[i]}else if(f>0)fl.push([i,f])});return{j1,j2,fl}}
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const st=state();x.textBaseline='middle';
+    P.forEach((p,i)=>{const on=tt>=arr(i),X=kx(i);x.fillStyle=on?'rgba(220,169,114,.18)':'rgba(255,255,255,.06)';rrect(x,X,14,86,96,10);x.fill();x.strokeStyle=on?C.goldD:'rgba(196,176,232,.4)';x.lineWidth=2;x.stroke();
+      x.textAlign='center';x.font=`700 24px ${MONO}`;x.fillStyle='#fff';x.fillText(p+' pts',X+43,44);x.font=`500 24px ${MONO}`;x.fillStyle='rgba(196,176,232,.9)';x.fillText('v '+Vv[i],X+43,82)});
+    x.font=`500 24px ${MONO}`;x.fillStyle='rgba(196,176,232,.85)';x.textAlign='center';x.fillText('block 1',kx(0)+187,136);x.fillText('block 2',kx(4)+187,136);
+    const top=210,bot=430;jar(x,220,top,bot,150,st.j1/T1,C.lil,'Jar 1 · points',String(st.j1),true);jar(x,620,top,bot,150,st.j2/T2,C.goldD,'Jar 2 · points × value',String(st.j2),true);
+    x.font=`900 72px ${ARCH}`;x.fillStyle='rgba(196,176,232,.5)';x.textAlign='center';x.fillText('÷',420,320);
+    st.fl.forEach(([i,f])=>{const sx=kx(i)+43,sy=110,e=ease(f);[[220,C.lil],[620,C.goldD]].forEach(([tx,c])=>{x.fillStyle=c;x.beginPath();x.arc(lerp(sx,tx,e),lerp(sy,top+10,e)-Math.sin(e*Math.PI)*40,11,0,TAU);x.fill()})});
+    const done=tt>=END;$('#jr1').textContent=st.j1;$('#jr2').textContent=st.j2;$('#jrA').textContent=done?(T2/T1).toFixed(1):'—';
+    if(done){x.font=`700 26px ${MONO}`;x.fillStyle=C.mint;x.fillText(`${T2} ÷ ${T1} = ${(T2/T1).toFixed(1)} ✓`,420,478)}}
+  renders.push(draw);draw();
+  H.jars={enter(){tt=RM?LOOP-1:0;draw()},tick(t,dt){if(RM)return;tt+=dt;if(tt>LOOP)tt=0;draw()}};})();
+
+/* ---------- EASY 3 · a new leader: shrink both jars by the same factor ---------- */
+(()=>{const ch=cv('leadCv'),x=ch.x;const S=[1,3,2,5,2,4],Vv=[20,40,10,60,30,50];
+  const m1=3,m2=5,c=Math.exp(m1-m2),pts=(s,m)=>Math.exp(s-m);
+  const a1=S.slice(0,3).reduce((a,s)=>a+pts(s,m1),0),b1=S.slice(0,3).reduce((a,s,i)=>a+pts(s,m1)*Vv[i],0);
+  const a2=S.slice(3).reduce((a,s)=>a+pts(s,m2),0),b2=S.slice(3).reduce((a,s,i)=>a+pts(s,m2)*Vv[i+3],0);
+  const J1=a1,J2=b1;// scales: jar 1 full at 1.7, jar 2 full at 90
+  const arr=[.6,1.2,1.8],SH0=3.0,SH1=4.4,arr2=[5.0,5.6,6.2],END=6.8,LOOP=11;let tt=0;
+  function st(){const k=clamp((tt-SH0)/(SH1-SH0),0,1),sh=lerp(1,c,ease(k));let j1=0,j2=0;
+    arr.forEach((t0,i)=>{const f=clamp((tt-t0)/.5,0,1);j1+=f*pts(S[i],m1);j2+=f*pts(S[i],m1)*Vv[i]});j1*=sh;j2*=sh;
+    let n1=0,n2=0;arr2.forEach((t0,i)=>{const f=clamp((tt-t0)/.5,0,1);n1+=f*pts(S[i+3],m2);n2+=f*pts(S[i+3],m2)*Vv[i+3]});return{k,sh,j1,j2,n1,n2}}
+  function draw(){x.clearRect(0,0,ch.w,ch.h);const s=st(),b2on=tt>=SH0-.6,leader=tt>=SH0-.6?m2:m1;x.textBaseline='middle';
+    const kx=i=>30+i*128+(i>=3?40:0);
+    S.forEach((sc,i)=>{const vis=i<3?tt>=arr[i]:tt>=SH0-.6,X=kx(i);x.globalAlpha=vis?1:.25;const isL=vis&&sc===leader;
+      x.fillStyle=isL?'rgba(220,169,114,.22)':'#fff';rrect(x,X,40,112,108,10);x.fill();x.strokeStyle=isL?C.gold:C.hair;x.lineWidth=isL?3:2;x.stroke();
+      x.textAlign='center';x.font=`700 26px ${MONO}`;x.fillStyle=C.ink;x.fillText('score '+sc,X+56,70);
+      const ref=i<3?(tt>=SH0?m2:m1):m2,p=pts(sc,ref),pShown=i<3?lerp(pts(sc,m1),pts(sc,m2),ease(s.k)):p;
+      x.font=`600 24px ${MONO}`;x.fillStyle=isL?C.gold:C.mut;x.fillText((pShown>=.995?'1':pShown.toFixed(2))+' pt',X+56,104);x.fillStyle=C.mut2;x.fillText('v '+Vv[i],X+56,132);
+      if(isL){x.font=`700 24px ${MONO}`;x.fillStyle=C.gold;x.fillText('★ leader',X+56,22)}x.globalAlpha=1});
+    const top=232,bot=420;
+    jar(x,250,top,bot,150,s.j1/1.7,C.mid2,'Jar 1',(s.j1+s.n1).toFixed(2),false,{h:s.n1/1.7,col:C.gold});
+    jar(x,600,top,bot,150,s.j2/90,C.mid2,'Jar 2',(s.j2+s.n2).toFixed(1),false,{h:s.n2/90,col:C.gold});
+    x.font=`900 64px ${ARCH}`;x.fillStyle=C.hair;x.textAlign='center';x.fillText('÷',425,330);
+    if(tt>=SH0-.4&&tt<SH1+.6){x.fillStyle=C.red2;x.font=`700 26px ${MONO}`;x.fillText(`New leader! Shrink both jars × ${c.toFixed(2)}`,425,478)}
+    else if(tt>=END){x.fillStyle=C.ok;x.font=`700 26px ${MONO}`;x.fillText(`Answer ${((s.j2+s.n2)/(s.j1+s.n1)).toFixed(1)} · same as all at once ✓`,425,478)}
+    $('#ldL').textContent=tt>=arr[0]?String(leader):'—';$('#ldC').textContent=tt>=SH0?'× '+c.toFixed(2):'—';const tot1=s.j1+s.n1;$('#ldR').textContent=tot1>0?((s.j2+s.n2)/tot1).toFixed(1):'—'}
+  renders.push(draw);draw();
+  H.leader={enter(){tt=RM?LOOP-.5:0;draw()},tick(t,dt){if(RM)return;tt+=dt*.85;if(tt>LOOP)tt=0;draw()}};})();
+
+/* ---------- EASY 4 · three moves: notebook that SRAM keeps per row ---------- */
+(()=>{const ch=cv('movesCv'),x=ch.x;const B=[[[1,3,2],[20,40,10]],[[5,2,4],[60,30,50]],[[4,6,1],[40,70,20]]];
+  const states=[{L:null,j1:0,j2:0,sh:null}];B.forEach(([sc,v])=>{const p=states[states.length-1],ml=Math.max(...sc),L=p.L==null?ml:Math.max(p.L,ml),sh=p.L!=null&&L>p.L?Math.exp(p.L-L):null,f=sh??1;
+    const add1=sc.reduce((a,s)=>a+Math.exp(s-L),0),add2=sc.reduce((a,s,i)=>a+Math.exp(s-L)*v[i],0);states.push({L,j1:p.j1*f+add1,j2:p.j2*f+add2,sh})});
+  const all=B.flatMap(b=>b[0]),allv=B.flatMap(b=>b[1]),M=Math.max(...all),ex=all.reduce((a,s,i)=>a+Math.exp(s-M)*allv[i],0)/all.reduce((a,s)=>a+Math.exp(s-M),0);
+  const per=2.4,LOOP=per*3+3.5;let tt=0;
+  function draw(){x.clearRect(0,0,ch.w,ch.h);x.textBaseline='middle';const k=Math.min(3,Math.floor(tt/per)+(tt%per>1.2?1:0)),blk=Math.min(2,Math.floor(tt/per)),f=(tt%per)/1.2,S2=states[Math.min(k,3)];
+    x.font=`500 24px ${MONO}`;x.fillStyle='rgba(196,176,232,.9)';x.textAlign='left';x.fillText('KEYS STREAM IN, ONE BLOCK AT A TIME',20,24);
+    B.forEach((b,i)=>{const done=i<k,flying=i===blk&&tt<per*3&&f<1;let X=30+i*230,Y=56;if(flying){X=lerp(X,280,ease(f));Y=lerp(56,190,ease(f))}if(done&&!flying)return;
+      x.globalAlpha=flying?1-.4*ease(f):1;x.fillStyle='rgba(196,176,232,.16)';rrect(x,X,Y,200,70,10);x.fill();x.strokeStyle=C.lil;x.lineWidth=2;x.stroke();x.fillStyle='#fff';x.font=`600 24px ${MONO}`;x.textAlign='center';x.fillText('scores '+b[0].join(' '),X+100,Y+35);x.globalAlpha=1});
+    x.fillStyle='rgba(156,232,192,.08)';rrect(x,20,170,680,330,16);x.fill();x.strokeStyle='rgba(156,232,192,.55)';x.lineWidth=2;x.stroke();
+    x.textAlign='left';x.font=`500 24px ${MONO}`;x.fillStyle=C.mint;x.fillText('SRAM NOTEBOOK · ONE ROW',44,204);
+    const rows=[['★ Leader',S2.L==null?'—':String(S2.L),S2.sh!=null],['Jar 1 · points',S2.j1.toFixed(2),false],['Jar 2 · points × value',S2.j2.toFixed(1),false]];
+    rows.forEach(([l,v,hl],i)=>{const y=262+i*62;x.font=`600 28px ${ARCH}`;x.fillStyle='#EEE8F6';x.textAlign='left';x.fillText(l,44,y);x.font=`800 34px ${MONO}`;x.fillStyle=hl?C.goldD:'#fff';x.textAlign='right';x.fillText(v,676,y)});
+    x.textAlign='left';x.font=`700 24px ${MONO}`;if(S2.sh!=null&&k<=3){x.fillStyle=C.goldD;x.fillText(`new leader → jars × ${S2.sh.toFixed(2)}`,44,452)}
+    if(k===3&&tt>per*3){x.fillStyle=C.mint;x.fillText(`answer = ${S2.j2.toFixed(1)} ÷ ${S2.j1.toFixed(2)} = ${(S2.j2/S2.j1).toFixed(1)}`,44,452);x.fillText(`exact softmax:  ${ex.toFixed(1)} ✓`,44,488)}
+    else if(S2.sh==null&&k>0){x.fillStyle='rgba(196,176,232,.8)';x.fillText('same leader → just add',44,452)}}
+  renders.push(draw);draw();
+  H.moves={enter(){tt=RM?LOOP-.5:0;draw()},tick(t,dt){if(RM)return;tt+=dt;if(tt>LOOP)tt=0;draw()}};})();
+/* ================= DECK ENGINE (reuse as-is) ================= */
+const stage=$('#stage'),vp=$('#viewport'),slides=$$('.slide'),Nn=slides.length;
+let cur=0,started=false,scale=1;
+const maxSteps=slides.map(s=>Math.max(0,...$$('[data-step]',s).map(e=>+e.dataset.step)));
+const stepState=slides.map(()=>0);
+const KEY='hidden:'+location.pathname+document.title;let hidden=new Set();try{hidden=new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){}
+function visible(){return slides.map((s,i)=>i).filter(i=>!hidden.has(i))}
+function renumber(){const v=visible();slides.forEach((s,i)=>{s.classList.toggle('hidden-slide',hidden.has(i));const k=v.indexOf(i);$$('.num',s).forEach(n=>n.textContent=k<0?'—':String(k+1).padStart(2,'0')+' / '+String(v.length).padStart(2,'0'))})}
+const dots=$('#dots');slides.forEach((s,i)=>{const b=document.createElement('button');b.setAttribute('aria-label','Go to slide '+(i+1));b.addEventListener('click',()=>go(i,false));dots.appendChild(b)});
+function layout(){const w=vp.clientWidth,h=vp.clientHeight;scale=Math.min(w/1920,h/1080);stage.style.transform=`translate(${(w-1920*scale)/2}px,${(h-1080*scale)/2}px) scale(${scale})`}
+function instant(els,fn){els.forEach(e=>e.style.transition='none');fn();void stage.offsetWidth;els.forEach(e=>e.style.transition='')}
+function rise(sl){const items=$$('.r',sl);instant(items,()=>items.forEach(e=>{e.classList.remove('in');e.style.transitionDelay='0ms'}));items.forEach((e,k)=>{e.style.transitionDelay=(140+k*95)+'ms';e.classList.add('in')})}
+function applySteps(i,reset){const sl=slides[i],els=$$('[data-step]',sl),st=stepState[i];const f=()=>els.forEach(e=>e.classList.toggle('on',+e.dataset.step<=st));reset?instant(els,f):f();H[sl.dataset.id]?.onStep?.(st)}
+function morph(from,to){$$('[data-morph]',from).forEach(o=>{const n=$(`[data-morph="${o.dataset.morph}"]`,to);if(!n)return;const a=o.getBoundingClientRect(),b=n.getBoundingClientRect();if(!a.width||!b.width)return;
+  n.style.transformOrigin='0 0';n.animate([{transform:`translate(${(a.left-b.left)/scale}px,${(a.top-b.top)/scale}px) scale(${a.width/b.width},${a.height/b.height})`},{transform:'none'}],{duration:900,easing:'cubic-bezier(.2,.8,.2,1)'})})}
+function go(i,back){if(i<0||i>=Nn||(started&&i===cur))return;const from=slides[cur],to=slides[i];
+  if(started&&!RM)morph(from,to);
+  if(started){from.classList.remove('active');H[from.dataset.id]?.leave?.()}
+  stepState[i]=back?maxSteps[i]:0;H[to.dataset.id]?.enter?.();applySteps(i,!back);
+  to.classList.add('active');rise(to);cur=i;started=true;updateRail();showNotes();try{history.replaceState(null,'','#'+(i+1))}catch(e){}}
+function neighbour(d){const v=visible();if(!v.length)return -1;if(d>0)return v.find(i=>i>cur)??-1;const b=v.filter(i=>i<cur);return b.length?b[b.length-1]:-1}
+function next(){if(stepState[cur]<maxSteps[cur]){stepState[cur]++;applySteps(cur,false);updateRail()}else{const n=neighbour(1);if(n>=0)go(n,false)}}
+function prev(){if(stepState[cur]>0){stepState[cur]--;applySteps(cur,false);updateRail()}else{const n=neighbour(-1);if(n>=0)go(n,true)}}
+function updateRail(){$$('#dots button').forEach((b,i)=>{b.classList.toggle('cur',i===cur);b.classList.toggle('hid',hidden.has(i))});const v=visible(),k=v.indexOf(cur),ms=maxSteps[cur];$('#count').textContent=`${k<0?'—':k+1} / ${v.length}`+(ms?` · step ${stepState[cur]}/${ms}`:'')}
+/* show / hide slides panel (H) */
+const panel=$('#panel'),plist=$('#panelList');
+function buildPanel(){plist.innerHTML='';slides.forEach((s,i)=>{const l=document.createElement('label');const c=document.createElement('input');c.type='checkbox';c.checked=!hidden.has(i);c.addEventListener('change',()=>{c.checked?hidden.delete(i):hidden.add(i);if(visible().length===0){hidden.delete(i);c.checked=true}try{localStorage.setItem(KEY,JSON.stringify([...hidden]))}catch(e){}renumber();updateRail()});l.appendChild(c);l.append(`${String(i+1).padStart(2,'0')} · ${s.dataset.title||s.querySelector('h2,h1')?.firstChild?.textContent||'Slide'}`);plist.appendChild(l)})}
+function togglePanel(){buildPanel();panel.classList.toggle('open')}
+const notesEl=$('#notes');function showNotes(){if(!notesEl.classList.contains('open'))return;const n=slides[cur].dataset.notes;$('#notesBody').textContent=n||'No notes for this slide. Add data-notes="…" to the <section>.'}
+$('#hidebtn').addEventListener('click',togglePanel);
+$('#next').addEventListener('click',next);$('#prev').addEventListener('click',prev);
+document.addEventListener('keydown',e=>{const tg=e.target.tagName;if(e.metaKey||e.ctrlKey||e.altKey)return;
+  if(tg==='INPUT'&&/Arrow|Page|Home|End/.test(e.key))return;
+  if((tg==='BUTTON'||tg==='INPUT')&&(e.key===' '||e.key==='Enter'))return;
+  if(['ArrowRight','ArrowDown','PageDown',' '].includes(e.key)){e.preventDefault();next()}
+  else if(['ArrowLeft','ArrowUp','PageUp','Backspace'].includes(e.key)){e.preventDefault();prev()}
+  else if(e.key==='Home'){const v=visible();if(v.length)go(v[0],false)}else if(e.key==='End'){const v=visible();if(v.length)go(v[v.length-1],true)}
+  else if(e.key==='f'||e.key==='F')toggleFS();else if(e.key==='h'||e.key==='H')togglePanel();else if(e.key==='n'||e.key==='N'){notesEl.classList.toggle('open');showNotes()}
+  else if(e.key==='r'||e.key==='R'){const v=visible();if(v.length)go(v[0],false)}
+  else if(/^[0-9]$/.test(e.key)){const v=visible(),k=e.key==='0'?9:+e.key-1;if(k<v.length)go(v[k],false)}
+  else if(e.key==='Escape'){panel.classList.remove('open');notesEl.classList.remove('open')}});
+document.addEventListener('pointerup',e=>{const t=e.target;if(t.matches&&t.matches('input[type=range],button'))setTimeout(()=>t.blur(),0)});
+let tx0=null,ty0=0;stage.addEventListener('touchstart',e=>{if(e.target.closest('input,button')){tx0=null;return}tx0=e.touches[0].clientX;ty0=e.touches[0].clientY},{passive:true});
+stage.addEventListener('touchend',e=>{if(tx0==null)return;const dx=e.changedTouches[0].clientX-tx0,dy=e.changedTouches[0].clientY-ty0;
+  if(Math.abs(dx)>60&&Math.abs(dx)>Math.abs(dy)*1.3)(dx<0?next:prev)();
+  else if(Math.abs(dx)<10&&Math.abs(dy)<10&&!e.target.closest('a,input,button,label,[data-interactive]')){const r=stage.getBoundingClientRect();(tx0<r.left+r.width/2?prev:next)()}
+  tx0=null});
+/* full screen pill: auto-hides after 2s idle in full screen; rail hidden in full screen / F11 */
+const fsb=$('#fsbtn');let idleT=null;
+function toggleFS(){const d=document,el=d.documentElement;if(d.fullscreenElement||d.webkitFullscreenElement){(d.exitFullscreen||d.webkitExitFullscreen).call(d)}else{const r=el.requestFullscreen||el.webkitRequestFullscreen;if(r){const pr=r.call(el);if(pr&&pr.catch)pr.catch(()=>{})}}}
+fsb.addEventListener('click',toggleFS);
+function fsState(){const api=!!(document.fullscreenElement||document.webkitFullscreenElement),f11=Math.abs(innerHeight-screen.height)<3&&Math.abs(innerWidth-screen.width)<3;document.body.classList.toggle('fs',api||f11);fsb.textContent=api?'Exit full screen (F)':'Full screen (F)';poke();layout()}
+function poke(){document.body.classList.remove('idle');clearTimeout(idleT);if(document.body.classList.contains('fs')&&!panel.classList.contains('open'))idleT=setTimeout(()=>document.body.classList.add('idle'),2000)}
+document.addEventListener('fullscreenchange',fsState);document.addEventListener('webkitfullscreenchange',fsState);
+addEventListener('mousemove',poke);addEventListener('resize',fsState);
+/* animation loop: only the active slide ticks */
+let lastT=performance.now();
+function loop(t){const dt=Math.max(0,Math.min(.05,(t-lastT)/1000));lastT=t;const h=H[slides[cur].dataset.id];if(h&&h.tick)h.tick(t/1000,dt);requestAnimationFrame(loop)}
+addEventListener('beforeprint',()=>{slides.forEach((s,i)=>{stepState[i]=maxSteps[i];$$('[data-step]',s).forEach(e=>e.classList.add('on'));H[s.dataset.id]?.onStep?.(maxSteps[i])});renders.forEach(f=>f())});
+if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>renders.forEach(f=>f()));
+renumber();fsState();
+const h0=parseInt((location.hash||'').slice(1),10);
+go(h0>=1&&h0<=Nn&&!hidden.has(h0-1)?h0-1:(visible()[0]??0),false);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
